@@ -414,6 +414,16 @@ function renderTop() {
       <button type="button" class="btn ghost" data-act="add-member-input">＋ メンバーを追加</button>
       <button class="btn primary wide">グループを作る</button>
     </form>
+    <div class="card howto">
+      <h3>使い方</h3>
+      <ol>
+        <li>グループ名とメンバーを入れて作る（メンバーはあとからも追加できます）</li>
+        <li>自分の名前を選んで、4桁の暗証番号を決める</li>
+        <li>右上の「共有」から、LINEでメンバーに送る</li>
+        <li>届いたURLを開いたメンバーが、自分の名前を選んで暗証番号を決める</li>
+      </ol>
+      <p class="caution">このページのURLを送っても、メンバーはグループに参加できません。グループを作ったあとの「共有」から送ってください。</p>
+    </div>
     ${recentGroups().length ? `
       <h3>最近開いたグループ</h3>
       <ul class="list">${recentGroups().map((g) => `
@@ -435,6 +445,7 @@ async function createGroup(form) {
   const db = makeClient(gid, null);
   await check(db.from('groups').insert({ id: gid, name }));
   await check(db.from('members').insert(names.map((n) => ({ group_id: gid, name: n }))));
+  lsSet(`guide:${gid}`, '1'); // 作った直後に、共有のしかたを1回だけ案内する
   location.hash = `#/g/${gid}`;
 }
 
@@ -555,6 +566,11 @@ function renderGroup() {
         <button class="btn small" data-act="share">共有</button>
       </div>
     </header>
+    ${lsGet(`guide:${state.gid}`) ? `
+      <div class="guide">
+        <div><b>グループができました</b><br>次は右上の「共有」から、LINEでメンバーに送りましょう。メンバーは届いたURLを開いて、自分の名前を選びます。</div>
+        <button class="x" data-act="dismiss-guide" aria-label="閉じる">×</button>
+      </div>` : ''}
     <nav class="tabs">
       ${tabs.map(([k, l]) => `<button class="${state.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}">${l}</button>`).join('')}
     </nav>
@@ -1789,8 +1805,13 @@ function canRestore(l) {
   return false;
 }
 
-// 「変更・削除」に入れる操作（追加・ログイン・確定などは入れない）
-const CHANGE_ACTIONS = ['UPDATE', 'DELETE', 'UNCONFIRM', 'SETTLE_MODE', 'PIN_RESET'];
+// 「お金の変更・削除」に入れるもの。
+// お金をこっそり動かしていないかを確かめるための欄なので、お金に関わる変更・削除と、
+// その前ぶれになりうる「確定の取り消し」「暗証番号のリセット」だけを入れる
+function isMoneyChange(l) {
+  if ((l.table_name === 'expenses' || l.table_name === 'payments') && (l.action === 'UPDATE' || l.action === 'DELETE')) return true;
+  return l.action === 'UNCONFIRM' || l.action === 'PIN_RESET';
+}
 
 // 自分に関係するログか（自分がした操作、または自分が関わる支払い・送金・メンバー）
 function logInvolvesMe(l) {
@@ -1817,7 +1838,7 @@ function viewLog() {
   const FILTERS = {
     all: () => true,
     mine: logInvolvesMe,
-    changes: (l) => CHANGE_ACTIONS.includes(l.action),
+    changes: isMoneyChange,
   };
   const logs = all.filter(FILTERS[filter] || FILTERS.all);
   const count = state.logCount || LOG_PAGE;
@@ -1846,9 +1867,9 @@ function viewLog() {
 
   const n = (k) => all.filter(FILTERS[k]).length;
   const tab = (k, label) => `<button class="${filter === k ? 'on' : ''}" data-act="log-filter" data-filter="${k}">${label}<span class="cnt">${n(k)}</span></button>`;
-  const empty = { all: 'まだ記録がありません', mine: 'あなたに関係する記録はまだありません', changes: '変更や削除はまだありません' };
+  const empty = { all: 'まだ記録がありません', mine: 'あなたに関係する記録はまだありません', changes: 'お金に関わる変更や削除はまだありません' };
   return `
-    <div class="seg log-seg">${tab('all', 'すべて')}${tab('mine', '自分関連')}${tab('changes', '変更・削除')}</div>
+    <div class="seg log-seg">${tab('all', 'すべて')}${tab('mine', '自分関連')}${tab('changes', 'お金の変更・削除')}</div>
     ${logs.length ? `<ul class="list">${logs.slice(0, count).map(row).join('')}</ul>` : `<p class="empty">${empty[filter]}</p>`}
     ${logs.length > count ? `<button class="btn ghost wide more-btn" data-act="log-more">もっと見る（残り${logs.length - count}件）</button>` : ''}`;
 }
@@ -1947,7 +1968,12 @@ app.addEventListener('click', (ev) => {
     case 'show-more': state.showCount = (state.showCount || PAGE_SIZE) + PAGE_STEP; render(); break;
     case 'log-filter': state.logFilter = t.dataset.filter; state.logCount = LOG_PAGE; render(); break;
     case 'log-more': state.logCount = (state.logCount || LOG_PAGE) + LOG_PAGE; render(); break;
-    case 'share': share(); break;
+    case 'share':
+      lsDel(`guide:${state.gid}`);
+      app.querySelector('.guide')?.remove();
+      share();
+      break;
+    case 'dismiss-guide': lsDel(`guide:${state.gid}`); render(); break;
     case 'copy-url': copyUrl(); break;
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
     case 'new-expense': state.view = { type: 'expense', id: null, newId: uuid() }; render(); break;

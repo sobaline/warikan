@@ -459,3 +459,13 @@ main > .seg { margin-bottom: 4px; }
 .adv-group > summary::after { content: '›'; color: var(--sub); transition: transform 0.25s; }
 .adv-group[open] > summary::after { transform: rotate(90deg); }
 .adv-group .list { margin: 0 8px 8px; background: var(--bg); }
+
+/* 使い方・最初の案内 */
+.howto { margin-top: 16px; }
+.howto h3 { margin-top: 0; }
+.howto ol { margin: 0 0 10px; padding-left: 1.4em; font-size: 0.92rem; }
+.howto li { margin-bottom: 4px; }
+.caution { font-size: 0.85rem; color: var(--warn-text); background: var(--warn-bg); border-radius: 10px; padding: 8px 12px; margin: 0; }
+.guide { display: flex; gap: 10px; align-items: flex-start; background: var(--mine-bg); color: var(--text); border: 1px solid var(--accent); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; font-size: 0.9rem; }
+.guide b { color: var(--accent); }
+.guide .x { margin-left: auto; }
