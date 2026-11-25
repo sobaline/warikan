@@ -87,6 +87,41 @@ function offerUndo(deletedId, msg) {
   toast(msg, { label: '元に戻す', fn: () => run(() => restoreFromLog(l.id, true)) });
 }
 
+// 確認のダイアログ（ブラウザの確認ダイアログは、設定や回数でブロックされることがあるので使わない）
+function askConfirm(message, { ok = 'OK', danger = false } = {}) {
+  if (window.__testConfirm) return window.__testConfirm(message);
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'confirm-overlay';
+    wrap.innerHTML = `
+      <div class="confirm-card" role="dialog" aria-modal="true">
+        <p class="confirm-msg"></p>
+        <div class="confirm-btns">
+          <button type="button" class="btn ghost" data-r="0">キャンセル</button>
+          <button type="button" class="btn ${danger ? 'danger-fill' : 'primary'}" data-r="1"></button>
+        </div>
+      </div>`;
+    wrap.querySelector('.confirm-msg').textContent = message;
+    wrap.querySelector('[data-r="1"]').textContent = ok;
+    const done = (v) => { wrap.remove(); resolve(v); };
+    wrap.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-r]');
+      if (b) done(b.dataset.r === '1');
+      else if (ev.target === wrap) done(false);
+    });
+    document.body.appendChild(wrap);
+    wrap.querySelector('[data-r="1"]').focus();
+  });
+}
+
+// 変更・削除が本当に反映されたかを確かめる。
+// データベースの制限で弾かれたときは、エラーにならず「0件」になるため
+async function mutate(query) {
+  const data = await check(query.select('id'));
+  if (!data || data.length === 0) throw new Error('NOT_APPLIED');
+  return data;
+}
+
 async function check(promise) {
   const { data, error } = await promise;
   if (error) throw error;
@@ -101,7 +136,20 @@ async function run(fn) {
     await fn();
   } catch (err) {
     console.error(err);
-    if (/row-level security|not_logged_in/i.test(err?.message || '')) {
+    if (err?.message === 'NOT_APPLIED') {
+      // 弾かれた理由が「ログインが切れている」かどうかを確かめる
+      let who = null;
+      try { who = (await state.db.rpc('whoami')).data; } catch { /* 無視 */ }
+      if (state.me && !who) {
+        logout('ログインが切れていたため、変更できませんでした。もう一度、自分の名前を選んで暗証番号を入れてください。');
+        try { await load(); } catch { /* 無視 */ }
+        render();
+      } else {
+        toast('変更できませんでした。ほかの人が先に削除・変更した可能性があるので、最新の状態にしました');
+        state.view = null;
+        try { await refresh(); } catch { /* 無視 */ }
+      }
+    } else if (/row-level security|not_logged_in/i.test(err?.message || '')) {
       // 暗証番号のリセットなどで、ログインが切れていた
       logout('ログインが切れていたため、保存できませんでした。もう一度、自分の名前を選んで暗証番号を入れてください。');
       try { await load(); } catch { /* 無視 */ }
@@ -530,6 +578,9 @@ function renderGroup() {
 const DRAFT_FORMS = ['expense-form', 'advance-form', 'loan-form', 'manual-pay-form', 'item-form', 'note-form'];
 const DRAFT_MAX_AGE = 6 * 60 * 60 * 1000; // 6時間より前の下書きは使わない
 
+// 折りたたみを見分ける目印（data-key があればそれ、なければ見出しの文字）
+const detailsKey = (det) => det.dataset.key || det.querySelector(':scope > summary')?.textContent.trim() || '';
+
 // 今の画面の入力値と、開いている折りたたみを取り出す
 function captureFormState() {
   const forms = {};
@@ -546,9 +597,9 @@ function captureFormState() {
     forms[id] = vals;
   }
   // 支払いの入力画面の中の折りたたみは、フォームの値と一緒に扱う
-  const details = [...app.querySelectorAll('details > summary')]
+  const details = [...app.querySelectorAll('details')]
     .filter((x) => !x.closest('#expense-form'))
-    .map((x) => [x.textContent.trim(), x.parentElement.open]);
+    .map((x) => [detailsKey(x), x.open]);
   return { forms, details };
 }
 
@@ -579,8 +630,8 @@ function applyFormState(st) {
     if (vals.__more) f.querySelector('details.more')?.setAttribute('open', '');
   }
   const open = new Set(st.open || []);
-  for (const sm of app.querySelectorAll('details > summary')) {
-    if (open.has(sm.textContent.trim())) sm.parentElement.open = true;
+  for (const det of app.querySelectorAll('details')) {
+    if (open.has(detailsKey(det))) det.open = true;
   }
 }
 
@@ -768,16 +819,21 @@ function viewLoans() {
     if (!byReceiver.has(p.to_member_id)) byReceiver.set(p.to_member_id, []);
     byReceiver.get(p.to_member_id).push(p);
   }
+  // 受け取った人ごとに、最初は合計だけを見せて閉じておく
   const advanceRows = [...byReceiver.entries()].map(([to, ps]) => `
-    <li class="item adv-head"><div class="main"><b>${esc(nameOf(to))}</b> が受け取った前払い金</div>
-      <div class="amt">${yen(ps.reduce((a, p) => a + Number(p.amount), 0))}</div></li>
-    ${ps.map((p) => `
-      <li class="item adv-row">
-        <div class="main">${esc(nameOf(p.from_member_id))} から
-          <div class="sub">${p.note ? `${esc(p.note)}・` : ''}${fmtTime(p.created_at)}</div></div>
-        <div class="amt">${yen(p.amount)}</div>
-        <button class="x" data-act="delete-advance" data-id="${p.id}" aria-label="削除">×</button>
-      </li>`).join('')}`).join('');
+    <details class="adv-group" data-key="adv:${to}">
+      <summary>
+        <span class="main"><b>${esc(nameOf(to))}</b> が受け取った前払い金<span class="sub">（${ps.length}件）</span></span>
+        <span class="amt">${yen(ps.reduce((a, p) => a + Number(p.amount), 0))}</span>
+      </summary>
+      <ul class="list">${ps.map((p) => `
+        <li class="item adv-row">
+          <div class="main">${esc(nameOf(p.from_member_id))} から
+            <div class="sub">${p.note ? `${esc(p.note)}・` : ''}${fmtTime(p.created_at)}</div></div>
+          <div class="amt">${yen(p.amount)}</div>
+          <button class="x" data-act="delete-advance" data-id="${p.id}" aria-label="削除">×</button>
+        </li>`).join('')}</ul>
+    </details>`).join('');
 
   const receiver = state.me;
   return `
@@ -797,7 +853,7 @@ function viewLoans() {
         <button class="btn primary wide">まとめて記録する</button>
       </form>
     </details>
-    ${advances.length ? `<ul class="list">${advanceRows}</ul>` : ''}
+    ${advances.length ? `<div class="adv-groups">${advanceRows}</div>` : ''}
     <details class="card manual loan">
       <summary>＋ お金を借りた・貸した記録を追加</summary>
       <p class="hint">「現金が足りなくてAさんに5,000円借りた」などを記録すると、最後の精算にまとめて反映されます。</p>
@@ -818,7 +874,7 @@ function viewLoans() {
 function closeSection(f) {
   const det = f.closest('details');
   if (!det) return;
-  formMemory.open.delete(det.querySelector('summary').textContent.trim());
+  formMemory.open.delete(detailsKey(det));
   det.open = false;
 }
 
@@ -841,7 +897,7 @@ async function saveAdvance(f) {
   await load();
   const dup = state.data.payments.some((p) => p.kind === 'advance' && p.to_member_id === receiver
     && Number(p.amount) === amount && localDate(p.created_at) === today() && from.includes(p.from_member_id));
-  if (dup && !confirm(`今日すでに同じ金額（${yen(amount)}）の前払い金が記録されています。二重入力ではありませんか？　このまま記録しますか？`)) return;
+  if (dup && !await askConfirm(`今日すでに同じ金額（${yen(amount)}）の前払い金が記録されています。二重入力ではありませんか？　このまま記録しますか？`)) return;
   const note = f.note.value.trim() || null;
   await check(state.db.from('payments').insert(from.map((id) => ({
     group_id: state.gid, from_member_id: id, to_member_id: receiver, amount, kind: 'advance', note,
@@ -1132,7 +1188,7 @@ async function saveExpense(f) {
     const rowChanged = keys.some((k) => String(before.row[k] ?? '') !== String(latest.row[k] ?? ''));
     if (rowChanged || before.shares !== latest.shares) {
       const what = rowChanged ? expenseDiff(before.row, latest.row) : '割る人などを変更';
-      if (!confirm(`あなたが編集している間に、ほかの人がこの支払いを変更しました。\n（${what}）\n\nあなたの内容で上書きしますか？\n「キャンセル」を押すと、最新の内容を表示します。`)) {
+      if (!await askConfirm(`あなたが編集している間に、ほかの人がこの支払いを変更しました。\n（${what}）\n\nあなたの内容で上書きしますか？\n「キャンセル」を押すと、最新の内容を表示します。`, { ok: '上書きする' })) {
         state.view = { type: 'expense', id: state.view.id, snapshot: latest };
         state.skipKeep = true;
         render();
@@ -1142,12 +1198,12 @@ async function saveExpense(f) {
   }
   const orig = state.view.id ? state.data.expenses.find((x) => x.id === state.view.id) : null;
   const unchanged = orig && orig.paid_at === row.paid_at && Math.round(Number(orig.jpy_amount)) === jpy;
-  if (!unchanged && !okToSaveDespiteDuplicates(row.paid_at, jpy, state.view.id)) return;
+  if (!unchanged && !await okToSaveDespiteDuplicates(row.paid_at, jpy, state.view.id)) return;
 
   const db = state.db;
   let id = state.view.id;
   if (id) {
-    await check(db.from('expenses').update(row).eq('id', id));
+    await mutate(db.from('expenses').update(row).eq('id', id));
     await check(db.from('expense_shares').delete().eq('expense_id', id));
   } else {
     id = (await check(db.from('expenses').insert({ ...row, id: formSeed() }).select('id').single())).id;
@@ -1293,14 +1349,14 @@ function viewSettle() {
 async function setMode(mode) {
   const patch = { settle_mode: mode };
   if (mode === 'hub' && !state.data.group.hub_member_id) patch.hub_member_id = state.me;
-  await check(state.db.from('groups').update(patch).eq('id', state.gid));
+  await mutate(state.db.from('groups').update(patch).eq('id', state.gid));
   await refresh();
 }
 
 async function markPaid(i) {
   const t = currentPlan().plan[i];
   if (!t) return;
-  if (!confirm(`${nameOf(t.from)} → ${nameOf(t.to)} ${yen(t.amount)} を送金済みにしますか？`)) return;
+  if (!await askConfirm(`${nameOf(t.from)} → ${nameOf(t.to)} ${yen(t.amount)} を送金済みにしますか？`, { ok: '送金済みにする' })) return;
   // 同じ送金をほかの人が先に記録していないか、最新の状態で確かめる
   await load();
   const still = currentPlan().plan.some((x) => x.from === t.from && x.to === t.to && x.amount === t.amount);
@@ -1356,7 +1412,7 @@ function viewConfirmBox() {
 async function confirmSettle(on) {
   const patch = on ? { confirmed_at: new Date().toISOString(), confirmed_by: state.me }
     : { confirmed_at: null, confirmed_by: null };
-  await check(state.db.from('groups').update(patch).eq('id', state.gid));
+  await mutate(state.db.from('groups').update(patch).eq('id', state.gid));
   await refresh();
 }
 
@@ -1393,7 +1449,7 @@ function viewMine() {
   const genres = [...CATEGORIES, '未分類'].filter((k) => byCat.has(k)).map((k) => {
     const its = items.filter((x) => (x.e.category || '未分類') === k);
     return `
-      <details class="genre">
+      <details class="genre" data-key="genre:${esc(k)}">
         <summary>
           <span class="g-name">${esc(k)}<span class="sub">（${its.length}件）</span></span>
           <span class="bar"><span style="width:${Math.max(2, Math.round((byCat.get(k) / maxCat) * 100))}%"></span></span>
@@ -1515,7 +1571,7 @@ async function resetPin(id) {
   const self = id === state.me;
   const msg = self ? '自分の暗証番号をリセットしますか？ このあと新しい番号を決め直します。'
     : `${nameOf(id)} さんの暗証番号をリセットしますか？ リセットしたことはログに残ります。`;
-  if (!confirm(msg)) return;
+  if (!await askConfirm(msg, { ok: 'リセットする', danger: true })) return;
   await check(state.db.rpc('reset_pin', { p_member: id }));
   if (self) {
     logout();
@@ -1532,7 +1588,7 @@ async function renameMember(id, name) {
   name = name.trim();
   if (!name) return;
   if (state.data.members.some((m) => m.name === name && m.id !== id)) return toast('同じ名前の人がいます');
-  await check(state.db.from('members').update({ name }).eq('id', id));
+  await mutate(state.db.from('members').update({ name }).eq('id', id));
   await refresh();
   toast('名前を変更しました');
 }
@@ -1540,8 +1596,8 @@ async function renameMember(id, name) {
 async function deleteMember(id) {
   if (id === state.me) return toast('自分は削除できません');
   if (memberInUse(id)) return toast('支払いや送金に関わっているため削除できません');
-  if (!confirm(`${nameOf(id)} をメンバーから削除しますか？`)) return;
-  await check(state.db.from('members').delete().eq('id', id));
+  if (!await askConfirm(`${nameOf(id)} をメンバーから削除しますか？`, { ok: '削除する', danger: true })) return;
+  await mutate(state.db.from('members').delete().eq('id', id));
   await refresh();
 }
 
@@ -1575,10 +1631,10 @@ function findDuplicates(date, amount, excludeId) {
   return hits;
 }
 
-function okToSaveDespiteDuplicates(date, amount, excludeId) {
+async function okToSaveDespiteDuplicates(date, amount, excludeId) {
   const hits = findDuplicates(date, amount, excludeId);
   if (!hits.length) return true;
-  return confirm(`同じ日付・同じ金額（${yen(amount)}）の記録がすでにあります。\n\n${hits.map((h) => `・${h}`).join('\n')}\n\n二重入力ではありませんか？　このまま保存しますか？`);
+  return askConfirm(`同じ日付・同じ金額（${yen(amount)}）の記録がすでにあります。\n\n${hits.map((h) => `・${h}`).join('\n')}\n\n二重入力ではありませんか？　このまま保存しますか？`, { ok: '保存する' });
 }
 
 /* 削除した支払い・貸し借りの復元 */
@@ -1591,7 +1647,7 @@ async function restoreFromLog(logId, quiet = false) {
   if (l.table_name === 'expenses') {
     if (d.allExpenses.some((e) => e.id === r.id)) return toast('すでに元に戻っています');
     if (!d.members.some((m) => m.id === r.payer_id)) return toast('立て替えた人がもういないため戻せません');
-    if (!quiet && !confirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`)) return;
+    if (!quiet && !await askConfirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`, { ok: '元に戻す' })) return;
     const row = {};
     for (const k of ['id', 'group_id', 'payer_id', 'title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'receipt_path', 'paid_at', 'paid_time', 'category', 'created_at']) {
       if (k in r) row[k] = r[k];
@@ -1609,7 +1665,7 @@ async function restoreFromLog(logId, quiet = false) {
     }))));
   } else if (l.table_name === 'payments') {
     if (d.payments.some((p) => p.id === r.id)) return toast('すでに元に戻っています');
-    if (!quiet && !confirm('この記録を元に戻しますか？')) return;
+    if (!quiet && !await askConfirm('この記録を元に戻しますか？', { ok: '元に戻す' })) return;
     const row = {};
     for (const k of ['id', 'group_id', 'from_member_id', 'to_member_id', 'amount', 'kind', 'note', 'created_at']) row[k] = r[k];
     await check(state.db.from('payments').insert(row));
@@ -1733,20 +1789,46 @@ function canRestore(l) {
   return false;
 }
 
+// 「変更・削除」に入れる操作（追加・ログイン・確定などは入れない）
+const CHANGE_ACTIONS = ['UPDATE', 'DELETE', 'UNCONFIRM', 'SETTLE_MODE', 'PIN_RESET'];
+
+// 自分に関係するログか（自分がした操作、または自分が関わる支払い・送金・メンバー）
+function logInvolvesMe(l) {
+  const me = state.me;
+  const r = l.detail || {};
+  if (l.member_id === me) return true;
+  switch (l.table_name) {
+    case 'expenses': {
+      if (r.payer_id === me) return true;
+      if (Array.isArray(r.shares)) return r.shares.some((x) => x.member_id === me);
+      return sharesOf(r.id).includes(me);
+    }
+    case 'payments': return r.from_member_id === me || r.to_member_id === me;
+    case 'members': return r.id === me || r.target === me;
+    case 'checklist_items': return r.done_by === me;
+    default: return false;
+  }
+}
+
 function viewLog() {
   const all = state.data.logs;
   if (!all.length) return '<p class="empty">まだ記録がありません</p>';
   const filter = state.logFilter || 'all';
-  const logs = filter === 'changes' ? all.filter((l) => l.action !== 'INSERT') : all;
+  const FILTERS = {
+    all: () => true,
+    mine: logInvolvesMe,
+    changes: (l) => CHANGE_ACTIONS.includes(l.action),
+  };
+  const logs = all.filter(FILTERS[filter] || FILTERS.all);
   const count = state.logCount || LOG_PAGE;
   const LABEL = {
     INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'],
-    CONFIRM: ['確定', 'cfm'], UNCONFIRM: ['取消', 'upd'], SETTLE_MODE: ['精算', 'upd'],
-    PIN_SET: ['設定', 'cfm'], LOGIN: ['ログイン', 'cfm'], PIN_RESET: ['リセット', 'del'],
+    CONFIRM: ['確定', 'cfm'], UNCONFIRM: ['確定取消', 'unc'], SETTLE_MODE: ['精算方法', 'upd'],
+    PIN_SET: ['暗証番号', 'info'], LOGIN: ['ログイン', 'info'], PIN_RESET: ['リセット', 'del'],
   };
 
   const row = (l) => {
-    const [label, cls] = LABEL[l.action] || [l.action, ''];
+    const [label, cls] = LABEL[l.action] || [l.action, 'info'];
     // 支払いの変更は、項目ごとに「前 → 後」を並べて見せる
     let body = esc(describeLog(l));
     if (l.table_name === 'expenses' && l.action === 'UPDATE' && l.old_detail) {
@@ -1762,13 +1844,12 @@ function viewLog() {
       </li>`;
   };
 
-  const changes = all.filter((l) => l.action !== 'INSERT').length;
+  const n = (k) => all.filter(FILTERS[k]).length;
+  const tab = (k, label) => `<button class="${filter === k ? 'on' : ''}" data-act="log-filter" data-filter="${k}">${label}<span class="cnt">${n(k)}</span></button>`;
+  const empty = { all: 'まだ記録がありません', mine: 'あなたに関係する記録はまだありません', changes: '変更や削除はまだありません' };
   return `
-    <div class="seg">
-      <button class="${filter === 'all' ? 'on' : ''}" data-act="log-filter" data-filter="all">すべて（${all.length}）</button>
-      <button class="${filter === 'changes' ? 'on' : ''}" data-act="log-filter" data-filter="changes">変更・削除だけ（${changes}）</button>
-    </div>
-    ${logs.length ? `<ul class="list">${logs.slice(0, count).map(row).join('')}</ul>` : '<p class="empty">変更や削除はまだありません</p>'}
+    <div class="seg log-seg">${tab('all', 'すべて')}${tab('mine', '自分関連')}${tab('changes', '変更・削除')}</div>
+    ${logs.length ? `<ul class="list">${logs.slice(0, count).map(row).join('')}</ul>` : `<p class="empty">${empty[filter]}</p>`}
     ${logs.length > count ? `<button class="btn ghost wide more-btn" data-act="log-more">もっと見る（残り${logs.length - count}件）</button>` : ''}`;
 }
 
@@ -1883,30 +1964,32 @@ app.addEventListener('click', (ev) => {
       break;
     }
     case 'delete-expense':
-      if (confirm('この支払いを削除しますか？')) {
-        run(async () => {
+      run(async () => {
+        if (!await askConfirm('この支払いを削除しますか？', { ok: '削除する', danger: true })) return;
+        {
           const delId = state.view.id;
-          await check(state.db.from('expenses').delete().eq('id', delId));
+          await mutate(state.db.from('expenses').delete().eq('id', delId));
           state.view = null;
           await refresh();
           offerUndo(delId, '支払いを削除しました');
-        });
-      }
+        }
+      });
       break;
     case 'mode': run(() => setMode(t.dataset.mode)); break;
     case 'paid': run(() => markPaid(Number(t.dataset.i))); break;
     case 'undo-paid':
-      if (confirm('この送金済みを取り消しますか？')) {
-        run(async () => {
-          await check(state.db.from('payments').delete().eq('id', id));
+      run(async () => {
+        if (!await askConfirm('この送金済みを取り消しますか？', { ok: '取り消す', danger: true })) return;
+        {
+          await mutate(state.db.from('payments').delete().eq('id', id));
           await refresh();
           offerUndo(id, '送金済みを取り消しました');
-        });
-      }
+        }
+      });
       break;
     case 'toggle-item':
       run(async () => {
-        await check(state.db.from('checklist_items')
+        await mutate(state.db.from('checklist_items')
           .update({ done: t.checked, done_by: t.checked ? state.me : null }).eq('id', id));
         await refresh();
       });
@@ -1918,7 +2001,9 @@ app.addEventListener('click', (ev) => {
     case 'restore': run(() => restoreFromLog(id)); break;
     case 'confirm-settle': run(() => confirmSettle(true)); break;
     case 'unconfirm':
-      if (confirm('確定を取り消しますか？')) run(() => confirmSettle(false));
+      run(async () => {
+        if (await askConfirm('確定を取り消しますか？', { ok: '取り消す', danger: true })) await confirmSettle(false);
+      });
       break;
     case 'copy-settle': {
       const text = settleText(currentPlan().plan);
@@ -1926,39 +2011,40 @@ app.addEventListener('click', (ev) => {
       break;
     }
     case 'delete-advance':
-      if (confirm('この前払い金の記録を削除しますか？')) {
-        run(async () => {
-          await check(state.db.from('payments').delete().eq('id', id));
+      run(async () => {
+        if (!await askConfirm('この前払い金の記録を削除しますか？', { ok: '削除する', danger: true })) return;
+        {
+          await mutate(state.db.from('payments').delete().eq('id', id));
           await refresh();
           offerUndo(id, '前払い金を削除しました');
-        });
-      }
+        }
+      });
       break;
     case 'delete-loan':
-      if (confirm('この貸し借りの記録を削除しますか？')) {
-        run(async () => {
-          await check(state.db.from('payments').delete().eq('id', id));
+      run(async () => {
+        if (!await askConfirm('この貸し借りの記録を削除しますか？', { ok: '削除する', danger: true })) return;
+        {
+          await mutate(state.db.from('payments').delete().eq('id', id));
           await refresh();
           offerUndo(id, '貸し借りを削除しました');
-        });
-      }
+        }
+      });
       break;
     case 'delete-item': {
       const it = state.data.items.find((x) => x.id === id);
-      if (!confirm(`「${it?.text ?? ''}」を削除しますか？`)) break;
       run(async () => {
-        await check(state.db.from('checklist_items').delete().eq('id', id));
+        if (!await askConfirm(`「${it?.text ?? ''}」を削除しますか？`, { ok: '削除する', danger: true })) return;
+        await mutate(state.db.from('checklist_items').delete().eq('id', id));
         await refresh();
       });
       break;
     }
     case 'delete-note':
-      if (confirm('このメモを削除しますか？')) {
-        run(async () => {
-          await check(state.db.from('notes').delete().eq('id', id));
-          await refresh();
-        });
-      }
+      run(async () => {
+        if (!await askConfirm('このメモを削除しますか？', { ok: '削除する', danger: true })) return;
+        await mutate(state.db.from('notes').delete().eq('id', id));
+        await refresh();
+      });
       break;
     default:
       break;
@@ -2009,7 +2095,7 @@ app.addEventListener('submit', (ev) => {
         const amount = Math.round(Number(f.amount.value));
         if (borrower === lender) return toast('借りた人と貸した人が同じです');
         if (!(amount > 0)) return toast('金額を入れてください');
-        if (!okToSaveDespiteDuplicates(today(), amount, null)) return;
+        if (!await okToSaveDespiteDuplicates(today(), amount, null)) return;
         // 貸した人 → 借りた人 へお金が動いたので、貸した人が受け取る側になる
         await check(state.db.from('payments').insert({
           group_id: state.gid,
@@ -2059,7 +2145,7 @@ app.addEventListener('change', (ev) => {
   }
   if (t.id === 'hub-select') {
     run(async () => {
-      await check(state.db.from('groups').update({ hub_member_id: t.value }).eq('id', state.gid));
+      await mutate(state.db.from('groups').update({ hub_member_id: t.value }).eq('id', state.gid));
       await refresh();
     });
   }

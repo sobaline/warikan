@@ -23,6 +23,9 @@
   --red-line: #fecaca;
   --blue-soft: #dbeafe;
   --blue: #1d4ed8;
+  --purple-soft: #ede9fe;
+  --purple: #6d28d9;
+  --gray-soft: #f0efed;
   --track: #e7e5e4;
   --toast-bg: #1c1917;
   --toast-text: #ffffff;
@@ -406,6 +409,9 @@ main > .seg { margin-bottom: 4px; }
     --red-line: #7f1d1d;
     --blue-soft: #172554;
     --blue: #93c5fd;
+    --purple-soft: #2e1065;
+    --purple: #c4b5fd;
+    --gray-soft: #2a2a2a;
     --track: #333333;
     --toast-bg: #ececec;
     --toast-text: #121212;
@@ -430,3 +436,26 @@ main > .seg { margin-bottom: 4px; }
 .adv-row .main { padding-left: 12px; }
 .manual + .list { margin-bottom: 12px; }
 .settle-line .sub { flex: none; white-space: nowrap; }
+
+/* 確認のダイアログ */
+.confirm-overlay { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / 0.45); display: flex; align-items: center; justify-content: center; padding: 24px; animation: sheet-fade 0.15s ease-out; }
+.confirm-card { width: 100%; max-width: 360px; background: var(--card); color: var(--text); border-radius: 16px; padding: 20px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.25); animation: sheet-up 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.confirm-msg { white-space: pre-wrap; margin-bottom: 16px; line-height: 1.6; }
+.confirm-btns { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.danger-fill { background: var(--minus); border-color: var(--minus); color: #fff; }
+
+/* ログの印：追加=緑 変更=オレンジ 削除=赤 確定=青 確定取消=紫 ログインなど=灰色 */
+.act.unc { background: var(--purple-soft); color: var(--purple); }
+.act.info { background: var(--gray-soft); color: var(--sub); }
+.log-seg .cnt { margin-left: 4px; font-size: 0.75rem; opacity: 0.7; }
+
+/* 前払い金：受け取った人ごとの折りたたみ */
+.adv-groups { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 12px; }
+.adv-group { background: var(--card); border-radius: 12px; box-shadow: 0 1px 3px var(--shadow); }
+.adv-group > summary { display: flex; align-items: center; gap: 10px; padding: 12px 14px; cursor: pointer; list-style: none; }
+.adv-group > summary::-webkit-details-marker { display: none; }
+.adv-group > summary .main { flex: 1; }
+.adv-group > summary .amt { font-weight: 700; }
+.adv-group > summary::after { content: '›'; color: var(--sub); transition: transform 0.25s; }
+.adv-group[open] > summary::after { transform: rotate(90deg); }
+.adv-group .list { margin: 0 8px 8px; background: var(--bg); }
