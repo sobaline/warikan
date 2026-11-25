@@ -511,7 +511,7 @@ function viewLoans() {
     </li>`).join('');
   return `
     <h3>貸し借り</h3>
-    <details class="card manual">
+    <details class="card manual loan">
       <summary>＋ お金を借りた・貸した記録を追加</summary>
       <p class="hint">「現金が足りなくてAさんに5,000円借りた」などを記録すると、最後の精算にまとめて反映されます。</p>
       <form id="loan-form">
@@ -541,7 +541,6 @@ function viewExpenseForm() {
     <div class="sheet">
       <form id="expense-form" class="card">
         <h2>${e ? '支払いを編集' : personal ? '自分の買い物を追加' : '支払いを追加'}</h2>
-        ${personal ? '<p class="hint">自分だけの買い物は精算には影響せず、「あなたが使ったお金」にだけ足されます。グループのメンバーにも一覧で見えます。</p>' : ''}
         <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="${personal ? '例：お土産' : '例：夕食'}"></label>
         <label>金額（<span id="cur-label">${esc(cur)}</span>）<input name="amount" type="number" inputmode="decimal" min="0" step="any" required value="${e ? Number(e.amount) : ''}"></label>
         <label>立て替えた人

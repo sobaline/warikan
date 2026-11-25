@@ -272,3 +272,7 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 .tips p { margin-bottom: 8px; }
 .add-row { margin-top: 12px; }
 .add-row .btn { margin: 0; }
+
+/* 貸し借りのボタン：控えめなオレンジ */
+.manual.loan { background: #fff7ed; border: 1px solid #fed7aa; }
+.manual.loan > summary { color: #c2410c; font-weight: 700; }
