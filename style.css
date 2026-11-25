@@ -9,6 +9,25 @@
   --plus: #15803d;
   --minus: #b91c1c;
   --line-green: #06c755;
+  --field: #ffffff;
+  --on-accent: #ffffff;
+  --mine-bg: #f0fdfa;
+  --warn-bg: #fef3c7;
+  --warn-line: #fcd34d;
+  --warn-text: #92400e;
+  --orange-bg: #fff7ed;
+  --orange-line: #fed7aa;
+  --orange: #c2410c;
+  --orange-soft: #ffedd5;
+  --red-soft: #fee2e2;
+  --red-line: #fecaca;
+  --blue-soft: #dbeafe;
+  --blue: #1d4ed8;
+  --track: #e7e5e4;
+  --toast-bg: #1c1917;
+  --toast-text: #ffffff;
+  --shadow: rgb(0 0 0 / 0.06);
+  color-scheme: light dark;
 }
 
 * { box-sizing: border-box; }
@@ -45,7 +64,7 @@ p { margin: 0 0 12px; }
   background: var(--card);
   border-radius: 16px;
   padding: 20px;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  box-shadow: 0 1px 3px var(--shadow);
 }
 
 label { display: block; margin-bottom: 14px; font-size: 0.9rem; color: var(--sub); }
@@ -61,7 +80,7 @@ input, select, textarea {
   border-radius: 10px;
   font: inherit;
   color: var(--text);
-  background: #fff;
+  background: var(--field);
 }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
 label.inline select { width: auto; margin: 0; }
@@ -78,7 +97,7 @@ form.row { margin-bottom: 8px; }
   padding: 10px 16px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #fff;
+  background: var(--field);
   color: var(--text);
   font: inherit;
   font-weight: 600;
@@ -87,9 +106,9 @@ form.row { margin-bottom: 8px; }
   cursor: pointer;
   white-space: nowrap;
 }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn.ghost { background: transparent; }
-.btn.danger { color: var(--minus); border-color: #fecaca; }
+.btn.danger { color: var(--minus); border-color: var(--red-line); }
 .btn.small { padding: 6px 12px; font-size: 0.85rem; }
 .btn.wide { display: block; width: 100%; margin-top: 12px; }
 .btn.line { background: var(--line-green); border-color: var(--line-green); }
@@ -115,7 +134,7 @@ form.row { margin-bottom: 8px; }
   position: sticky;
   top: 8px;
   z-index: 5;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+  box-shadow: 0 1px 3px var(--shadow);
 }
 .tabs button, .seg button {
   flex: 1;
@@ -149,7 +168,7 @@ li.item[data-act]:active { background: var(--bg); }
 .item .main { flex: 1; min-width: 0; }
 .item .title { font-weight: 600; overflow-wrap: anywhere; }
 .item .amt { text-align: right; font-weight: 700; white-space: nowrap; }
-.item.mine { background: #f0fdfa; }
+.item.mine { background: var(--mine-bg); }
 .item.log .main { font-size: 0.9rem; }
 
 .plus { color: var(--plus); }
@@ -159,8 +178,8 @@ li.item[data-act]:active { background: var(--bg); }
   display: inline-block;
   padding: 0 6px;
   border-radius: 6px;
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--warn-bg);
+  color: var(--warn-text);
   font-size: 0.75rem;
   font-weight: 700;
 }
@@ -217,8 +236,8 @@ details summary { color: var(--sub); font-size: 0.9rem; cursor: pointer; margin-
   left: 50%;
   bottom: 24px;
   transform: translateX(-50%);
-  background: var(--text);
-  color: #fff;
+  background: var(--toast-bg);
+  color: var(--toast-text);
   padding: 10px 16px;
   border-radius: 10px;
   font-size: 0.9rem;
@@ -240,8 +259,8 @@ details summary { color: var(--sub); font-size: 0.9rem; cursor: pointer; margin-
 .share-row { margin-top: 8px; }
 .share-row .btn { margin: 0; }
 .confirm-box { background: var(--card); border-radius: 12px; padding: 12px 14px; margin-top: 12px; font-size: 0.9rem; }
-.confirm-box.ok { background: #f0fdfa; }
-.confirm-box.warn { background: #fef3c7; border: 1px solid #fcd34d; }
+.confirm-box.ok { background: var(--mine-bg); }
+.confirm-box.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); }
 .confirm-box ul { margin: 8px 0; padding-left: 20px; }
 .confirm-box .link { margin-left: 8px; }
 .calc { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
@@ -274,8 +293,8 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 .add-row .btn { margin: 0; }
 
 /* 貸し借りのボタン：控えめなオレンジ */
-.manual.loan { background: #fff7ed; border: 1px solid #fed7aa; }
-.manual.loan > summary { color: #c2410c; font-weight: 700; }
+.manual.loan { background: var(--orange-bg); border: 1px solid var(--orange-line); }
+.manual.loan > summary { color: var(--orange); font-weight: 700; }
 
 /* わたしの家計簿 */
 .tap { cursor: pointer; }
@@ -316,19 +335,84 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 .g-name { font-weight: 600; white-space: nowrap; }
 .g-name .sub { margin-left: 2px; }
 .g-val { font-weight: 700; text-align: right; }
-.genre .bar { background: #e7e5e4; }
+.genre .bar { background: var(--track); }
 .genre .list { margin: 0 8px 8px; }
 
 /* ログ */
 .item.log { align-items: flex-start; }
 .act { flex: none; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; margin-top: 2px; }
 .act.add { background: var(--accent-soft); color: var(--accent); }
-.act.upd { background: #ffedd5; color: #c2410c; }
-.act.del { background: #fee2e2; color: var(--minus); }
+.act.upd { background: var(--orange-soft); color: var(--orange); }
+.act.del { background: var(--red-soft); color: var(--minus); }
 .diffs { margin: 4px 0 2px; }
 .diff { font-size: 0.88rem; }
 .diff s { color: var(--sub); }
-.diff b { color: #c2410c; }
+.diff b { color: var(--orange); }
 .d-label { display: inline-block; min-width: 4.5em; color: var(--sub); font-size: 0.8rem; }
 main > .seg { margin-bottom: 4px; }
-.act.cfm { background: #dbeafe; color: #1d4ed8; }
+.act.cfm { background: var(--blue-soft); color: var(--blue); }
+
+/* 自分の精算の状況 */
+.settle-line { display: flex; align-items: center; gap: 10px; background: var(--card); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; font-weight: 700; box-shadow: 0 1px 3px var(--shadow); }
+.settle-line .sub { font-weight: 600; }
+.settle-line .chev { margin-left: auto; }
+.settle-line.st-pay { color: var(--minus); }
+.settle-line.st-get { color: var(--plus); }
+.settle-line.st-done { color: var(--accent); }
+.my-settle { background: var(--card); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 3px var(--shadow); }
+.my-settle.st-done { background: var(--mine-bg); color: var(--accent); }
+.ms-row { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 1.05rem; }
+.ms-row b { font-size: 1.4rem; }
+.notice { display: flex; align-items: center; gap: 8px; background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-line); border-radius: 12px; padding: 10px 14px; margin-bottom: 8px; font-size: 0.9rem; font-weight: 600; }
+.notice .chev { margin-left: auto; color: inherit; }
+
+/* 並び替え・絞り込み */
+.list-tools { display: flex; gap: 8px; margin-top: 14px; }
+.list-tools select { margin: 0; padding: 6px 10px; font-size: 0.85rem; width: auto; flex: 1; }
+
+/* 金額の足し算 */
+.amount-row input { flex: 1; }
+.amount-row .btn { margin: 0; font-size: 1.1rem; padding: 6px 14px; }
+.calc { display: block; min-height: 1.2em; margin-top: 4px; font-size: 0.85rem; font-weight: 700; color: var(--accent); }
+
+/* 元に戻す付きの通知 */
+#toast { display: flex; align-items: center; gap: 12px; }
+#toast[hidden] { display: none; }
+.toast-btn { border: 0; background: none; color: var(--accent-soft); font: inherit; font-weight: 700; padding: 0; cursor: pointer; }
+
+/* ダークモード：スマホの設定に合わせて自動で切り替える */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121212;
+    --card: #1e1e1e;
+    --text: #ececec;
+    --sub: #a8a29e;
+    --line: #2e2e2e;
+    --accent: #2dd4bf;
+    --accent-soft: #134e4a;
+    --plus: #4ade80;
+    --minus: #f87171;
+    --field: #262626;
+    --on-accent: #042f2e;
+    --mine-bg: #10302d;
+    --warn-bg: #3a2e0c;
+    --warn-line: #6b5414;
+    --warn-text: #fcd34d;
+    --orange-bg: #2e1d0e;
+    --orange-line: #6b3b12;
+    --orange: #fb923c;
+    --orange-soft: #43260f;
+    --red-soft: #3f1515;
+    --red-line: #7f1d1d;
+    --blue-soft: #172554;
+    --blue: #93c5fd;
+    --track: #333333;
+    --toast-bg: #ececec;
+    --toast-text: #121212;
+    --shadow: rgb(0 0 0 / 0.4);
+  }
+  .toast-btn { color: var(--accent-soft); filter: none; }
+  .tabs button.on, .seg button.on { color: var(--accent); }
+  .btn.line { color: #04260f; }
+  input[type="date"], input[type="time"] { color-scheme: dark; }
+}

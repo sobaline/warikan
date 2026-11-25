@@ -34,9 +34,9 @@ const localDate = (ts) => new Date(ts).toLocaleDateString('sv-SE');
 function recentGroups() {
   try { return JSON.parse(lsGet('recent') || '[]'); } catch { return []; }
 }
-function rememberGroup(id, name) {
+function rememberGroup(id, name, done = false) {
   const list = recentGroups().filter((g) => g.id !== id);
-  list.unshift({ id, name, at: Date.now() });
+  list.unshift({ id, name, at: Date.now(), done });
   lsSet('recent', JSON.stringify(list.slice(0, 20)));
 }
 function forgetGroup(id) {
@@ -67,12 +67,24 @@ function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* 無視 */ 
 function lsDel(k) { try { localStorage.removeItem(k); } catch { /* 無視 */ } }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, action) {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button class="toast-btn">${esc(action.label)}</button>` : ''}`;
   el.hidden = false;
+  el.onclick = action ? (ev) => {
+    if (!ev.target.closest('.toast-btn')) return;
+    el.hidden = true;
+    action.fn();
+  } : null;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3000);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 6000 : 3000);
+}
+
+// 削除したあとに「元に戻す」付きの通知を出す（ログの記録から戻す）
+function offerUndo(deletedId, msg) {
+  const l = state.data.logs.find((x) => x.action === 'DELETE' && x.detail?.id === deletedId);
+  if (!l) return toast(msg);
+  toast(msg, { label: '元に戻す', fn: () => run(() => restoreFromLog(l.id, true)) });
 }
 
 async function check(promise) {
@@ -251,6 +263,7 @@ async function load() {
 
 async function refresh() {
   await load();
+  if (state.data?.group && state.me) rememberGroup(state.gid, state.data.group.name, mySettlement().done);
   render();
 }
 
@@ -270,6 +283,8 @@ function route() {
 
 async function openGroup(gid) {
   state.showCount = PAGE_SIZE;
+  state.listFilter = 'all';
+  state.listSort = 'new';
   state.logCount = LOG_PAGE;
   state.logFilter = 'all';
   formMemory.forms = {};
@@ -287,7 +302,10 @@ async function openGroup(gid) {
       <a class="btn" href="#/">トップへ</a></div>`;
     return;
   }
-  if (state.data.group) rememberGroup(gid, state.data.group.name);
+  if (state.data.group) {
+    const prev = recentGroups().find((g) => g.id === gid);
+    rememberGroup(gid, state.data.group.name, prev?.done ?? false);
+  }
   if (state.me && !state.data.members.some((m) => m.id === state.me)) {
     state.me = null;
     state.db = makeClient(gid, null);
@@ -328,7 +346,7 @@ function renderTop() {
       <h3>最近開いたグループ</h3>
       <ul class="list">${recentGroups().map((g) => `
         <li class="item">
-          <a class="main grouplink" href="#/g/${esc(g.id)}">${esc(g.name)}</a>
+          <a class="main grouplink" href="#/g/${esc(g.id)}">${esc(g.name)}${g.done ? ' <span class="badge ok">精算完了</span>' : ''}</a>
           <button class="x" data-act="forget-group" data-id="${esc(g.id)}" aria-label="一覧から外す">×</button>
         </li>`).join('')}</ul>
       <p class="hint">この端末で開いたグループだけが表示されます。×を押しても、グループ自体は消えません。</p>` : ''}`;
@@ -535,67 +553,89 @@ function viewSheet() {
 
 function viewExpenses() {
   const d = state.data;
-  const list = sortedExpenses();
+  const all = sortedExpenses();
   const mine = (e) => shareAmounts(e).get(state.me) || 0;
-  const groupList = list.filter((e) => !isPersonal(e));
-  const groupSum = (items) => items.filter((e) => !isPersonal(e)).reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
-  const total = groupSum(list);
-  const myTotal = list.reduce((sum, e) => sum + mine(e), 0);
-  const myPersonal = list.filter((e) => isPersonal(e) && e.payer_id === state.me).reduce((sum, e) => sum + mine(e), 0);
+  const groupList = all.filter((e) => !isPersonal(e));
+  const total = groupList.reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+  const myTotal = all.reduce((sum, e) => sum + mine(e), 0);
+  const myPersonal = all.filter((e) => isPersonal(e) && e.payer_id === state.me).reduce((sum, e) => sum + mine(e), 0);
   const avg = d.members.length ? Math.round(total / d.members.length) : 0;
 
-  // 種類別（どれか1件でも種類が付いているときだけ出す）
-  let cats = '';
-  if (groupList.some((e) => e.category)) {
-    const sums = new Map();
-    for (const e of groupList) {
-      const k = e.category || '未分類';
-      sums.set(k, (sums.get(k) || 0) + Math.round(Number(e.jpy_amount)));
-    }
-    const order = [...CATEGORIES, '未分類'].filter((k) => sums.has(k));
-    cats = `<div class="cats">${order.map((k) => `<span>${esc(k)} <b>${yen(sums.get(k))}</b></span>`).join('')}</div>`;
-  }
+  // 自分の精算の状況（押すと精算タブへ）
+  const m = mySettlement();
+  const st = mySettleText(m);
+  const settleLine = m.empty ? '' : `<div class="settle-line tap ${st.cls}" data-act="tab" data-tab="settle"><span class="sub">精算</span>${esc(st.text)}<span class="chev">›</span></div>`;
 
-  // 日付ごとに区切る
-  const days = [];
-  for (const e of list) {
-    let g = days[days.length - 1];
-    if (!g || g.date !== e.paid_at) {
-      g = { date: e.paid_at, items: [] };
-      days.push(g);
-    }
-    g.items.push(e);
-  }
+  // 明細の金額がまだ決まっていない、自分が立て替えた外貨の支払い
+  const pending = all.filter((e) => e.currency !== 'JPY' && !e.jpy_confirmed && e.payer_id === state.me);
+  const notice = pending.length
+    ? `<div class="notice tap" data-act="list-filter" data-filter="pending">明細の金額がまだの支払いが${pending.length}件あります（あなたの立て替え）<span class="chev">›</span></div>`
+    : '';
+
+  // 並び替えと絞り込み
+  const filter = state.listFilter === 'pending' && !pending.length ? 'all' : (state.listFilter || 'all');
+  const sort = state.listSort || 'new';
+  let list = all;
+  if (filter === 'mine') list = all.filter((e) => e.payer_id === state.me || sharesOf(e.id).includes(state.me));
+  if (filter === 'pending') list = pending;
+  if (sort === 'amount') list = [...list].sort((a, b) => Number(b.jpy_amount) - Number(a.jpy_amount));
+  const tools = all.length ? `
+    <div class="list-tools">
+      <select id="list-filter" aria-label="絞り込み">
+        <option value="all" ${filter === 'all' ? 'selected' : ''}>すべて</option>
+        <option value="mine" ${filter === 'mine' ? 'selected' : ''}>自分が関わった支払い</option>
+        ${pending.length ? `<option value="pending" ${filter === 'pending' ? 'selected' : ''}>明細の金額がまだ</option>` : ''}
+      </select>
+      <select id="list-sort" aria-label="並び替え">
+        <option value="new" ${sort === 'new' ? 'selected' : ''}>新しい順</option>
+        <option value="amount" ${sort === 'amount' ? 'selected' : ''}>金額が大きい順</option>
+      </select>
+    </div>` : '';
+
   // 新しいものから決まった件数だけ出し、残りは「もっと見る」で出す
   const limit = state.showCount || PAGE_SIZE;
-  let shown = 0;
-  const body = days.map((g) => {
-    if (shown >= limit) return '';
-    const visibleItems = g.items.slice(0, limit - shown);
-    shown += visibleItems.length;
-    const dayAll = groupSum(g.items);
-    const dayMine = g.items.reduce((sum, e) => sum + mine(e), 0);
-    return `
-      <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)} ／ 全体 ${yen(dayAll)}</span></div>
-      <ul class="list">${visibleItems.map(expenseRow).join('')}</ul>`;
-  }).join('');
-  const rest = list.length - shown;
+  const visible = list.slice(0, limit);
+  let body;
+  if (sort === 'amount') {
+    body = `<ul class="list">${visible.map(expenseRow).join('')}</ul>`;
+  } else {
+    // 日付ごとに区切る。小計は、隠れている分も含めたその日の自分の負担額
+    const days = [];
+    for (const e of visible) {
+      let g = days[days.length - 1];
+      if (!g || g.date !== e.paid_at) {
+        g = { date: e.paid_at, items: [] };
+        days.push(g);
+      }
+      g.items.push(e);
+    }
+    body = days.map((g) => {
+      const dayMine = list.filter((e) => e.paid_at === g.date).reduce((sum, e) => sum + mine(e), 0);
+      return `
+        <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)}</span></div>
+        <ul class="list">${g.items.map(expenseRow).join('')}</ul>`;
+    }).join('');
+  }
+  const rest = list.length - visible.length;
   const more = rest > 0
     ? `<button class="btn ghost wide more-btn" data-act="show-more">もっと見る（残り${rest}件）</button>`
     : '';
+  const emptyMsg = all.length ? '<p class="empty">条件に合う支払いはありません</p>' : '<p class="empty">まだ支払いがありません</p>';
 
   return `
     <div class="totals">
       <div class="tap" data-act="open-mine"><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b>${myPersonal ? `<div class="sub">うち自分の買い物 ${yen(myPersonal)}</div>` : ''}<div class="more-link">わたしの家計簿 ›</div></div>
       <div><div class="sub">グループ全体（${groupList.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
     </div>
-    ${cats}
+    ${settleLine}
+    ${notice}
     <div class="row add-row">
       <button class="btn primary grow" data-act="new-expense">＋ 支払いを追加</button>
       <button class="btn" data-act="new-personal">＋ 自分の買い物</button>
     </div>
-    ${list.length ? body + more : '<p class="empty">まだ支払いがありません</p>'}
-    ${list.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
+    ${tools}
+    ${list.length ? body + more : emptyMsg}
+    ${all.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
     ${viewLoans()}`;
 }
 
@@ -672,7 +712,13 @@ function viewExpenseForm() {
       <form id="expense-form" class="card">
         <h2>${e ? '支払いを編集' : personal ? '自分の買い物を追加' : '支払いを追加'}</h2>
         <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="${personal ? '例：お土産' : '例：夕食'}"></label>
-        <label>金額（<span id="cur-label">${esc(cur)}</span>）<input name="amount" type="number" inputmode="decimal" min="0" step="any" required value="${e ? Number(e.amount) : ''}"></label>
+        <label>金額（<span id="cur-label">${esc(cur)}</span>）
+          <div class="row amount-row">
+            <input name="amount" type="text" inputmode="decimal" autocomplete="off" required value="${e ? Number(e.amount) : ''}" placeholder="例：3000　または　1200+800">
+            <button type="button" class="btn small" data-act="amount-plus" aria-label="足し算の＋を入れる">＋</button>
+          </div>
+          <span class="calc" id="calc-result"></span>
+        </label>
         <label>立て替えた人
           <select name="payer">${d.members.map((m) => `<option value="${m.id}" ${m.id === (e?.payer_id ?? state.me) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
         </label>
@@ -740,9 +786,28 @@ function viewExpenseForm() {
     </div>`;
 }
 
+// 金額の欄の文字を数にする。「1200+800-100」のような足し算・引き算と、全角数字に対応
+function evalAmount(str) {
+  const t = String(str ?? '')
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[＋]/g, '+').replace(/[－ー−]/g, '-').replace(/[．]/g, '.')
+    .replace(/[,，円\s]/g, '');
+  if (!t || !/^[0-9.+-]+$/.test(t) || /[+-]{2}|[+-]$|^\+/.test(t)) return NaN;
+  const nums = t.match(/-?[0-9.]+/g) || [];
+  if (nums.join('') !== t.replace(/\+/g, '')) return NaN;
+  let sum = 0;
+  for (const n of nums) {
+    if ((n.match(/\./g) || []).length > 1) return NaN;
+    sum += Number(n);
+  }
+  return Math.round(sum * 100) / 100;
+}
+
+const hasOperator = (str) => /[+\-＋－ー−]/.test(String(str).replace(/^[-－ー−]/, ''));
+
 // 入力画面の今の値から、精算に使う円の金額を出す
 function formJpy(f) {
-  const amount = Number(f.amount.value);
+  const amount = evalAmount(f.amount.value) || 0;
   if (f.currency.value === 'JPY') return Math.round(amount) || 0;
   if (f.jpy_actual.value !== '') return Math.round(Number(f.jpy_actual.value)) || 0;
   const rate = Number(f.rate.value);
@@ -772,7 +837,13 @@ function updatePreview() {
   f.querySelector('.fx').hidden = cur === 'JPY';
 
   const p = document.getElementById('jpy-preview');
-  const amount = Number(f.amount.value);
+  const amount = evalAmount(f.amount.value) || 0;
+  const calc = document.getElementById('calc-result');
+  const raw = f.amount.value;
+  if (raw && hasOperator(raw)) calc.textContent = Number.isNaN(evalAmount(raw)) ? '式が正しくありません' : `＝ ${evalAmount(raw).toLocaleString('ja-JP')}`;
+  else if (raw && Number.isNaN(evalAmount(raw))) calc.textContent = '数字で入力してください';
+  else if (cur === 'JPY' && raw && !Number.isInteger(evalAmount(raw))) calc.textContent = '円は1円単位で入力してください';
+  else calc.textContent = '';
   const rate = Number(f.rate.value);
   if (f.jpy_actual.value !== '') p.textContent = `精算には ${yen(f.jpy_actual.value)} を使います（確定）`;
   else if (amount && rate) p.textContent = `仮の円額：${yen(amount * rate)}（明細の金額がわかったら上に入力）`;
@@ -850,9 +921,11 @@ async function saveExpense(f) {
   const shares = formShares(f);
   if (!shares.length) return toast('誰の分かを1人以上選んでください');
   const title = f.title.value.trim();
-  const amount = Number(f.amount.value);
+  const amount = evalAmount(f.amount.value);
   const currency = f.currency.value;
-  if (!title || !(amount >= 0)) return toast('内容と金額を入れてください');
+  if (!title) return toast('「何に」を入れてください');
+  if (Number.isNaN(amount) || amount < 0) return toast('金額を正しく入力してください');
+  if (currency === 'JPY' && !Number.isInteger(amount)) return toast('円は1円単位で入力してください');
 
   let rate = 1;
   let jpy = Math.round(amount);
@@ -937,6 +1010,38 @@ async function saveExpense(f) {
   toast('保存しました');
 }
 
+/* 自分の精算の状況（支払いタブと精算タブの上に出す） */
+
+function mySettlement() {
+  const { plan } = currentPlan();
+  const pay = plan.filter((t) => t.from === state.me);
+  const get = plan.filter((t) => t.to === state.me);
+  const hasGroupExpenses = state.data.expenses.some((e) => !isPersonal(e)) || state.data.payments.length > 0;
+  return { pay, get, plan, done: hasGroupExpenses && plan.length === 0, empty: !hasGroupExpenses };
+}
+
+function mySettleText(m) {
+  const sum = (xs) => xs.reduce((a, t) => a + t.amount, 0);
+  if (m.done) return { cls: 'st-done', text: '精算はすべて完了しました' };
+  if (m.pay.length === 1) return { cls: 'st-pay', text: `あなたは ${nameOf(m.pay[0].to)} に ${yen(m.pay[0].amount)} 払う` };
+  if (m.pay.length > 1) return { cls: 'st-pay', text: `あなたは ${m.pay.length}人に 合計 ${yen(sum(m.pay))} 払う` };
+  if (m.get.length === 1) return { cls: 'st-get', text: `あなたは ${nameOf(m.get[0].from)} から ${yen(m.get[0].amount)} 受け取る` };
+  if (m.get.length > 1) return { cls: 'st-get', text: `あなたは ${m.get.length}人から 合計 ${yen(sum(m.get))} 受け取る` };
+  return { cls: 'st-done', text: 'あなたの精算はありません' };
+}
+
+// 精算タブの上：自分が送る・受け取るお金を大きく出す
+function viewMySettleBox() {
+  const m = mySettlement();
+  if (m.empty) return '';
+  if (m.done) return '<div class="my-settle st-done"><b>精算はすべて完了しました</b><div class="sub">追加の支払いが入ると、また計算されます</div></div>';
+  const lines = [
+    ...m.pay.map((t) => `<div class="ms-row"><span>${esc(nameOf(t.to))} に</span><b class="minus">${yen(t.amount)}</b><span>払う</span></div>`),
+    ...m.get.map((t) => `<div class="ms-row"><span>${esc(nameOf(t.from))} から</span><b class="plus">${yen(t.amount)}</b><span>受け取る</span></div>`),
+  ];
+  return `<div class="my-settle"><div class="sub">あなたの精算</div>${lines.length ? lines.join('') : '<b>あなたの精算はありません</b>'}</div>`;
+}
+
 /* 精算タブ */
 
 function currentPlan() {
@@ -976,6 +1081,7 @@ function viewSettle() {
     </li>`).join('');
 
   return `
+    ${viewMySettleBox()}
     <div class="seg">
       <button class="${mode === 'auto' ? 'on' : ''}" data-act="mode" data-mode="auto">自動（回数を最小に）</button>
       <button class="${mode === 'hub' ? 'on' : ''}" data-act="mode" data-mode="hub">幹事にまとめる</button>
@@ -1279,7 +1385,7 @@ function okToSaveDespiteDuplicates(date, amount, excludeId) {
 
 /* 削除した支払い・貸し借りの復元 */
 
-async function restoreFromLog(logId) {
+async function restoreFromLog(logId, quiet = false) {
   const d = state.data;
   const l = d.logs.find((x) => x.id === logId);
   if (!l || l.action !== 'DELETE') return;
@@ -1287,7 +1393,7 @@ async function restoreFromLog(logId) {
   if (l.table_name === 'expenses') {
     if (d.allExpenses.some((e) => e.id === r.id)) return toast('すでに元に戻っています');
     if (!d.members.some((m) => m.id === r.payer_id)) return toast('立て替えた人がもういないため戻せません');
-    if (!confirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`)) return;
+    if (!quiet && !confirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`)) return;
     const row = {};
     for (const k of ['id', 'group_id', 'payer_id', 'title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'receipt_path', 'paid_at', 'paid_time', 'category', 'created_at']) {
       if (k in r) row[k] = r[k];
@@ -1305,7 +1411,7 @@ async function restoreFromLog(logId) {
     }))));
   } else if (l.table_name === 'payments') {
     if (d.payments.some((p) => p.id === r.id)) return toast('すでに元に戻っています');
-    if (!confirm('この記録を元に戻しますか？')) return;
+    if (!quiet && !confirm('この記録を元に戻しますか？')) return;
     const row = {};
     for (const k of ['id', 'group_id', 'from_member_id', 'to_member_id', 'amount', 'kind', 'note', 'created_at']) row[k] = r[k];
     await check(state.db.from('payments').insert(row));
@@ -1545,6 +1651,11 @@ app.addEventListener('click', (ev) => {
       render();
       break;
     case 'tab': state.tab = t.dataset.tab; render(); break;
+    case 'list-filter':
+      state.listFilter = t.dataset.filter;
+      state.showCount = PAGE_SIZE;
+      render();
+      break;
     case 'show-more': state.showCount = (state.showCount || PAGE_SIZE) + PAGE_STEP; render(); break;
     case 'log-filter': state.logFilter = t.dataset.filter; state.logCount = LOG_PAGE; render(); break;
     case 'log-more': state.logCount = (state.logCount || LOG_PAGE) + LOG_PAGE; render(); break;
@@ -1557,12 +1668,21 @@ app.addEventListener('click', (ev) => {
     case 'edit-expense': state.view = { type: 'expense', id, snapshot: expenseSnapshot(id) }; render(); break;
     case 'close': state.view = null; render(); break;
     case 'fetch-rate': run(fillRate); break;
+    case 'amount-plus': {
+      const input = document.querySelector('#expense-form input[name="amount"]');
+      if (input.value && !/[+]$/.test(input.value)) input.value += '+';
+      input.focus();
+      updatePreview();
+      break;
+    }
     case 'delete-expense':
       if (confirm('この支払いを削除しますか？')) {
         run(async () => {
-          await check(state.db.from('expenses').delete().eq('id', state.view.id));
+          const delId = state.view.id;
+          await check(state.db.from('expenses').delete().eq('id', delId));
           state.view = null;
           await refresh();
+          offerUndo(delId, '支払いを削除しました');
         });
       }
       break;
@@ -1573,6 +1693,7 @@ app.addEventListener('click', (ev) => {
         run(async () => {
           await check(state.db.from('payments').delete().eq('id', id));
           await refresh();
+          offerUndo(id, '送金済みを取り消しました');
         });
       }
       break;
@@ -1602,6 +1723,7 @@ app.addEventListener('click', (ev) => {
         run(async () => {
           await check(state.db.from('payments').delete().eq('id', id));
           await refresh();
+          offerUndo(id, '貸し借りを削除しました');
         });
       }
       break;
@@ -1699,6 +1821,14 @@ app.addEventListener('change', (ev) => {
   const t = ev.target;
   if (t.closest('#expense-form')) updatePreview();
   if (t.name === 'currency' && t.value !== 'JPY') run(fillRate);
+  if (t.id === 'list-filter' || t.id === 'list-sort') {
+    if (t.id === 'list-filter') state.listFilter = t.value;
+    else state.listSort = t.value;
+    state.showCount = PAGE_SIZE;
+    t.blur();
+    render();
+    return;
+  }
   if (t.id === 'settle-all') {
     const f = t.closest('form');
     const shares = [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);
@@ -1717,6 +1847,19 @@ app.addEventListener('change', (ev) => {
 ['input', 'change'].forEach((type) => app.addEventListener(type, (ev) => {
   if (ev.target.closest('form')) saveDraftSoon();
 }));
+
+// 金額の欄から離れたら、足し算の式を計算結果に置き換える
+app.addEventListener('focusout', (ev) => {
+  const t = ev.target;
+  if (t.name === 'amount' && t.closest('#expense-form') && hasOperator(t.value)) {
+    const v = evalAmount(t.value);
+    if (!Number.isNaN(v)) {
+      t.value = String(v);
+      updatePreview();
+      saveDraftSoon();
+    }
+  }
+});
 
 // ページを離れる直前にも下書きを残す
 window.addEventListener('pagehide', saveDraft);
