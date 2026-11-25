@@ -101,7 +101,12 @@ async function run(fn) {
     await fn();
   } catch (err) {
     console.error(err);
-    if (/duplicate|unique|foreign key/i.test(err?.message || '')) {
+    if (/row-level security|not_logged_in/i.test(err?.message || '')) {
+      // 暗証番号のリセットなどで、ログインが切れていた
+      logout('ログインが切れていたため、保存できませんでした。もう一度、自分の名前を選んで暗証番号を入れてください。');
+      try { await load(); } catch { /* 無視 */ }
+      render();
+    } else if (/duplicate|unique|foreign key/i.test(err?.message || '')) {
       // ほかの人と同時に同じものを操作した
       toast('ほかの人と同時に操作したため、最新の状態に更新しました。もう一度確認してください');
       state.view = null;
@@ -114,13 +119,27 @@ async function run(fn) {
   }
 }
 
-function makeClient(gid, me) {
+function makeClient(gid, me, token) {
   const headers = { 'x-group-id': gid };
   if (me) headers['x-member-id'] = me;
+  if (token) headers['x-member-token'] = token; // 暗証番号でログインしたときの合い鍵
   return createClient(SUPABASE_URL, SUPABASE_KEY, {
     global: { headers },
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
+}
+
+const tokenKey = () => `tok:${state.gid}`;
+
+// ログイン状態を消して、名前を選ぶ画面に戻す
+function logout(reason) {
+  lsDel(`me:${state.gid}`);
+  lsDel(tokenKey());
+  state.me = null;
+  state.view = null;
+  state.pick = null;
+  state.db = makeClient(state.gid, null, null);
+  state.logoutReason = reason || '';
 }
 
 // 共有用のURL。LINEで開いたときにSafariやChromeで開くよう ?openExternalBrowser=1 を付ける
@@ -224,9 +243,9 @@ function sortedExpenses() {
 async function load() {
   const g = state.gid;
   const db = state.db;
-  const [group, members, expenses, shares, payments, notes, items, logs] = await Promise.all([
+  const [group, members, expenses, shares, payments, notes, items, logs, who] = await Promise.all([
     check(db.from('groups').select('*').eq('id', g).maybeSingle()),
-    check(db.from('members').select('*').eq('group_id', g).order('created_at').order('id')),
+    check(db.from('members').select('id,group_id,name,created_at,pin_set').eq('group_id', g).order('created_at').order('id')),
     check(db.from('expenses').select('*').eq('group_id', g)
       .order('paid_at', { ascending: false }).order('created_at', { ascending: false })),
     check(db.from('expense_shares').select('*').eq('group_id', g)),
@@ -234,7 +253,13 @@ async function load() {
     check(db.from('notes').select('*').eq('group_id', g).order('created_at', { ascending: false })),
     check(db.from('checklist_items').select('*').eq('group_id', g).order('created_at')),
     check(db.from('logs').select('*').eq('group_id', g).order('created_at', { ascending: false }).limit(100)),
+    state.me ? check(db.rpc('whoami')) : Promise.resolve(null),
   ]);
+  // 暗証番号がリセットされたなどで、ログインが切れていないか
+  if (state.me && who !== state.me) {
+    const hadToken = !!lsGet(tokenKey());
+    logout(hadToken ? 'ログインが切れました。もう一度、自分の名前を選んで暗証番号を入れてください。' : '');
+  }
   // 他の人の「自分の買い物」は、一覧・合計・ログから外す（本人の画面にだけ出す）
   const personalOf = (e) => {
     const ids = shares.filter((s) => s.expense_id === e.id);
@@ -291,7 +316,9 @@ async function openGroup(gid) {
   formMemory.open = new Set();
   state.gid = gid;
   state.me = lsGet(`me:${gid}`);
-  state.db = makeClient(gid, state.me);
+  state.pick = null;
+  state.logoutReason = '';
+  state.db = makeClient(gid, state.me, lsGet(`tok:${gid}`));
   state.tab = 'expenses';
   app.innerHTML = '<p class="loading">読み込み中…</p>';
   try {
@@ -306,10 +333,7 @@ async function openGroup(gid) {
     const prev = recentGroups().find((g) => g.id === gid);
     rememberGroup(gid, state.data.group.name, prev?.done ?? false);
   }
-  if (state.me && !state.data.members.some((m) => m.id === state.me)) {
-    state.me = null;
-    state.db = makeClient(gid, null);
-  }
+  if (state.me && !state.data.members.some((m) => m.id === state.me)) logout();
   if (state.me) restoreDraft();
   render();
 }
@@ -370,13 +394,17 @@ async function createGroup(form) {
 
 function renderPick() {
   const d = state.data;
+  const target = state.pick ? d.members.find((m) => m.id === state.pick) : null;
+  if (target) return renderPin(target);
   app.innerHTML = `
     <div class="card">
       <h2>${esc(d.group.name)}</h2>
+      ${state.logoutReason ? `<p class="notice">${esc(state.logoutReason)}</p>` : ''}
       <p>あなたはどのメンバーですか？</p>
       <div class="pick">
-        ${d.members.map((m) => `<button class="btn" data-act="pick-me" data-id="${m.id}">${esc(m.name)}</button>`).join('')}
+        ${d.members.map((m) => `<button class="btn" data-act="pick-me" data-id="${m.id}">${esc(m.name)}${m.pin_set ? ' <span class="lock" aria-label="暗証番号あり">🔒</span>' : ''}</button>`).join('')}
       </div>
+      <p class="hint">🔒 の人は暗証番号を設定済みです。初めて選ぶときに、自分だけの4桁の暗証番号を決めます。</p>
       <details>
         <summary>リストに名前がない場合</summary>
         <form id="join-form" class="row">
@@ -387,11 +415,67 @@ function renderPick() {
     </div>`;
 }
 
-function setMe(id) {
+// 暗証番号を決める・入れる画面
+function renderPin(m) {
+  const first = !m.pin_set;
+  app.innerHTML = `
+    <div class="card">
+      <h2>${esc(m.name)} さん</h2>
+      ${first
+    ? '<p>はじめてなので、<b>4桁の暗証番号</b>を決めてください。別のスマホやPCで開いたときに使います。ほかの人には教えないでください。</p>'
+    : '<p>暗証番号（4桁）を入れてください。</p>'}
+      <form id="pin-form" data-id="${m.id}" data-first="${first ? 1 : 0}">
+        <label>暗証番号<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required class="pin-input"></label>
+        ${first ? '<label>もう一度<input name="pin2" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" required class="pin-input"></label>' : ''}
+        <p class="pin-error" id="pin-error"></p>
+        <button class="btn primary wide">${first ? 'この番号に決める' : '入る'}</button>
+      </form>
+      ${first ? '' : '<p class="hint">忘れたときは、グループのほかのメンバーに「メンバー」画面からリセットしてもらってください。</p>'}
+      <button class="btn ghost wide" data-act="pick-back">名前を選び直す</button>
+    </div>`;
+  app.querySelector('.pin-input')?.focus();
+}
+
+async function submitPin(f) {
+  const id = f.dataset.id;
+  const pin = f.pin.value.trim();
+  const err = document.getElementById('pin-error');
+  if (!/^[0-9]{4}$/.test(pin)) { err.textContent = '数字4桁で入れてください'; return; }
+  let token;
+  if (f.dataset.first === '1') {
+    if (pin !== f.pin2.value.trim()) { err.textContent = '2回の番号が一致しません'; return; }
+    const { data, error } = await state.db.rpc('set_pin', { p_member: id, p_pin: pin });
+    if (error) {
+      if (/pin_already_set/.test(error.message)) {
+        await load();
+        render();
+        return toast('ついさっき、この名前の暗証番号が設定されました。暗証番号を入れてください');
+      }
+      throw error;
+    }
+    token = data;
+  } else {
+    const res = await check(state.db.rpc('login', { p_member: id, p_pin: pin }));
+    if (res.error === 'wrong_pin') { err.textContent = `暗証番号が違います（あと${res.left}回まちがえると10分間ロックされます）`; f.pin.value = ''; return; }
+    if (res.error === 'locked') { err.textContent = `まちがいが続いたため、ロックしています。${res.minutes}分ほど待ってください`; return; }
+    if (res.error === 'pin_not_set') { await load(); render(); return; }
+    if (res.error) throw new Error(res.error);
+    token = res.token;
+  }
+  lsSet(tokenKey(), token);
+  state.pick = null;
+  state.logoutReason = '';
   state.me = id;
   lsSet(`me:${state.gid}`, id);
-  state.db = makeClient(state.gid, id);
-  run(refresh);
+  state.db = makeClient(state.gid, id, token);
+  await refresh();
+  toast(f.dataset.first === '1' ? '暗証番号を設定しました' : 'ログインしました');
+}
+
+function setMe(id) {
+  // 自分の名前を選んだら、暗証番号を決める・入れる画面へ
+  state.pick = id;
+  render();
 }
 
 async function joinGroup(form) {
@@ -566,11 +650,8 @@ function viewExpenses() {
   const st = mySettleText(m);
   const settleLine = m.empty ? '' : `<div class="settle-line tap ${st.cls}" data-act="tab" data-tab="settle"><span class="sub">精算</span>${esc(st.text)}<span class="chev">›</span></div>`;
 
-  // 明細の金額がまだ決まっていない、自分が立て替えた外貨の支払い
-  const pending = all.filter((e) => e.currency !== 'JPY' && !e.jpy_confirmed && e.payer_id === state.me);
-  const notice = pending.length
-    ? `<div class="notice tap" data-act="list-filter" data-filter="pending">明細の金額がまだの支払いが${pending.length}件あります（あなたの立て替え）<span class="chev">›</span></div>`
-    : '';
+  // 明細の金額がまだ決まっていない外貨の支払い（お知らせはチェックリストに入る）
+  const pending = all.filter((e) => e.currency !== 'JPY' && !e.jpy_confirmed);
 
   // 並び替えと絞り込み
   const filter = state.listFilter === 'pending' && !pending.length ? 'all' : (state.listFilter || 'all');
@@ -628,7 +709,6 @@ function viewExpenses() {
       <div><div class="sub">グループ全体（${groupList.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
     </div>
     ${settleLine}
-    ${notice}
     <div class="row add-row">
       <button class="btn primary grow" data-act="new-expense">＋ 支払いを追加</button>
       <button class="btn" data-act="new-personal">＋ 自分の買い物</button>
@@ -1007,6 +1087,7 @@ async function saveExpense(f) {
   }))));
   state.view = null;
   await refresh();
+  await syncPendingItem(id);
   toast('保存しました');
 }
 
@@ -1040,6 +1121,26 @@ function viewMySettleBox() {
     ...m.get.map((t) => `<div class="ms-row"><span>${esc(nameOf(t.from))} から</span><b class="plus">${yen(t.amount)}</b><span>受け取る</span></div>`),
   ];
   return `<div class="my-settle"><div class="sub">あなたの精算</div>${lines.length ? lines.join('') : '<b>あなたの精算はありません</b>'}</div>`;
+}
+
+/* 外貨の支払いで、明細の金額がまだのものをチェックリストに入れる。
+   明細の金額を入れたら自動でチェックが付き、支払いを消すと項目も消える */
+async function syncPendingItem(expenseId) {
+  const e = state.data.allExpenses.find((x) => x.id === expenseId);
+  if (!e || isPersonal(e)) return; // 自分の買い物は他の人に見せない
+  const item = state.data.items.find((it) => it.expense_id === expenseId);
+  const pending = e.currency !== 'JPY' && !e.jpy_confirmed;
+  const text = `「${e.title}」（${Number(e.amount).toLocaleString('ja-JP')} ${e.currency}）の明細の金額を入力する（${nameOf(e.payer_id)}）`;
+  if (pending && !item) {
+    await check(state.db.from('checklist_items').insert({ group_id: state.gid, text, expense_id: e.id }));
+  } else if (pending && item && (item.text !== text || item.done)) {
+    await check(state.db.from('checklist_items').update({ text, done: false, done_by: null }).eq('id', item.id));
+  } else if (!pending && item && !item.done) {
+    await check(state.db.from('checklist_items').update({ done: true, done_by: state.me }).eq('id', item.id));
+  } else {
+    return;
+  }
+  await refresh();
 }
 
 /* 精算タブ */
@@ -1166,7 +1267,7 @@ function viewConfirmBox() {
   if (!changes.length) {
     return `<div class="confirm-box ok">
       <b>確定済み</b>（${fmtTime(g.confirmed_at)}${who ? `・${esc(who)}` : ''}）。確定後の変更はありません。
-      <button class="link" data-act="unconfirm">確定を取り消す</button>
+      <div><button class="btn small" data-act="unconfirm">確定を取り消す</button></div>
     </div>`;
   }
   return `<div class="confirm-box warn">
@@ -1321,8 +1422,10 @@ function viewMembers() {
               <button class="btn small">名前を変更</button>
               <button type="button" class="btn small danger" data-act="delete-member" data-id="${m.id}">削除</button>
             </form>
+            <div class="pin-row sub">暗証番号：${m.pin_set ? '設定済み' : '未設定'}
+              ${m.pin_set ? `<button type="button" class="link" data-act="reset-pin" data-id="${m.id}">リセット</button>` : ''}</div>
           </li>`).join('')}</ul>
-        <p class="hint">支払いや送金に関わっている人は削除できません。</p>
+        <p class="hint">支払いや送金に関わっている人は削除できません。暗証番号を忘れた人がいたらリセットしてください。その人は次に開いたときに新しい番号を決めます（リセットした人はログに残ります）。</p>
         <h3>メンバーを追加</h3>
         <form id="add-member-form" class="row">
           <input name="name" required maxlength="20" placeholder="名前">
@@ -1331,6 +1434,23 @@ function viewMembers() {
         <button class="btn ghost wide" data-act="close">閉じる</button>
       </div>
     </div>`;
+}
+
+async function resetPin(id) {
+  const self = id === state.me;
+  const msg = self ? '自分の暗証番号をリセットしますか？ このあと新しい番号を決め直します。'
+    : `${nameOf(id)} さんの暗証番号をリセットしますか？ リセットしたことはログに残ります。`;
+  if (!confirm(msg)) return;
+  await check(state.db.rpc('reset_pin', { p_member: id }));
+  if (self) {
+    logout();
+    await load();
+    state.pick = id;
+    render();
+    return;
+  }
+  await refresh();
+  toast('暗証番号をリセットしました');
 }
 
 async function renameMember(id, name) {
@@ -1419,6 +1539,7 @@ async function restoreFromLog(logId, quiet = false) {
     return;
   }
   await refresh();
+  if (l.table_name === 'expenses') await syncPendingItem(r.id);
   toast('元に戻しました');
 }
 
@@ -1485,6 +1606,9 @@ function describeLog(l) {
   const A = { INSERT: '追加', UPDATE: '変更', DELETE: '削除' }[l.action] ?? l.action;
   switch (l.table_name) {
     case 'members':
+      if (l.action === 'PIN_SET') return `${r.name} さんが暗証番号を設定した`;
+      if (l.action === 'LOGIN') return `${r.name} さんが暗証番号でログインした`;
+      if (l.action === 'PIN_RESET') return `${r.name} さんの暗証番号をリセットした`;
       if (l.action === 'UPDATE' && l.old_detail && l.old_detail.name !== r.name) {
         return `メンバーの名前を変更：${l.old_detail.name} → ${r.name}`;
       }
@@ -1536,6 +1660,7 @@ function viewLog() {
   const LABEL = {
     INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'],
     CONFIRM: ['確定', 'cfm'], UNCONFIRM: ['取消', 'upd'], SETTLE_MODE: ['精算', 'upd'],
+    PIN_SET: ['設定', 'cfm'], LOGIN: ['ログイン', 'cfm'], PIN_RESET: ['リセット', 'del'],
   };
 
   const row = (l) => {
@@ -1645,11 +1770,11 @@ app.addEventListener('click', (ev) => {
       break;
     case 'pick-me': setMe(id); break;
     case 'change-me':
-      lsDel(`me:${state.gid}`);
-      state.me = null;
-      state.db = makeClient(state.gid, null);
+      logout();
       render();
       break;
+    case 'pick-back': state.pick = null; render(); break;
+    case 'reset-pin': run(() => resetPin(id)); break;
     case 'tab': state.tab = t.dataset.tab; render(); break;
     case 'list-filter':
       state.listFilter = t.dataset.filter;
@@ -1757,6 +1882,7 @@ app.addEventListener('submit', (ev) => {
     return;
   }
   switch (f.id) {
+    case 'pin-form': run(() => submitPin(f)); break;
     case 'add-member-form': run(() => addMember(f.name.value)); break;
     case 'create-form': run(() => createGroup(f)); break;
     case 'join-form': run(() => joinGroup(f)); break;

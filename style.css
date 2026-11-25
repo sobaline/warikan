@@ -416,3 +416,9 @@ main > .seg { margin-bottom: 4px; }
   .btn.line { color: #04260f; }
   input[type="date"], input[type="time"] { color-scheme: dark; }
 }
+
+/* 暗証番号 */
+.pin-input { font-size: 1.6rem; letter-spacing: 0.5em; text-align: center; }
+.pin-error { color: var(--minus); font-weight: 700; min-height: 1.2em; }
+.lock { font-size: 0.8em; }
+.pin-row { margin: -2px 0 10px; display: flex; gap: 10px; align-items: center; }
