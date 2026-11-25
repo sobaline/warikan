@@ -527,7 +527,7 @@ function renderGroup() {
 
 /* ---------- 入力途中の内容を守る ---------- */
 
-const DRAFT_FORMS = ['expense-form', 'loan-form', 'manual-pay-form', 'item-form', 'note-form'];
+const DRAFT_FORMS = ['expense-form', 'advance-form', 'loan-form', 'manual-pay-form', 'item-form', 'note-form'];
 const DRAFT_MAX_AGE = 6 * 60 * 60 * 1000; // 6時間より前の下書きは使わない
 
 // 今の画面の入力値と、開いている折りたたみを取り出す
@@ -750,7 +750,9 @@ function expenseRow(e) {
 function viewLoans() {
   const d = state.data;
   const loans = d.payments.filter((p) => p.kind === 'loan');
-  const rows = loans.map((p) => `
+  const advances = d.payments.filter((p) => p.kind === 'advance');
+  const memberOptions = (sel) => d.members.map((m) => `<option value="${m.id}" ${m.id === sel ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
+  const loanRows = loans.map((p) => `
     <li class="item">
       <div class="main">
         <b>${esc(nameOf(p.to_member_id))}</b> が <b>${esc(nameOf(p.from_member_id))}</b> から借りた
@@ -759,22 +761,95 @@ function viewLoans() {
       <div class="amt">${yen(p.amount)}</div>
       <button class="x" data-act="delete-loan" data-id="${p.id}" aria-label="削除">×</button>
     </li>`).join('');
+
+  // 前払い金は、受け取った人ごとにまとめて見せる
+  const byReceiver = new Map();
+  for (const p of advances) {
+    if (!byReceiver.has(p.to_member_id)) byReceiver.set(p.to_member_id, []);
+    byReceiver.get(p.to_member_id).push(p);
+  }
+  const advanceRows = [...byReceiver.entries()].map(([to, ps]) => `
+    <li class="item adv-head"><div class="main"><b>${esc(nameOf(to))}</b> が受け取った前払い金</div>
+      <div class="amt">${yen(ps.reduce((a, p) => a + Number(p.amount), 0))}</div></li>
+    ${ps.map((p) => `
+      <li class="item adv-row">
+        <div class="main">${esc(nameOf(p.from_member_id))} から
+          <div class="sub">${p.note ? `${esc(p.note)}・` : ''}${fmtTime(p.created_at)}</div></div>
+        <div class="amt">${yen(p.amount)}</div>
+        <button class="x" data-act="delete-advance" data-id="${p.id}" aria-label="削除">×</button>
+      </li>`).join('')}`).join('');
+
+  const receiver = state.me;
   return `
-    <h3>貸し借り</h3>
+    <h3>前払い金・貸し借り</h3>
+    <details class="card manual advance">
+      <summary>＋ 前払い金（集金）を記録</summary>
+      <p class="hint">幹事が先に集めたお金を記録します。航空券やホテル代そのものは、ふつうの支払いとして入れてください。精算で差し引きされ、多く集めた分は幹事から返します。</p>
+      <form id="advance-form">
+        <label>受け取った人（幹事など）<select name="receiver">${memberOptions(receiver)}</select></label>
+        <label>1人あたりの金額（円）<input name="amount" type="number" inputmode="numeric" min="1" step="1" required></label>
+        <div class="label">払った人</div>
+        <div class="checks">
+          ${d.members.map((m) => `<label class="check"><input type="checkbox" name="advance_from" value="${m.id}" ${m.id !== receiver ? 'checked' : ''}>${esc(m.name)}</label>`).join('')}
+        </div>
+        <label>メモ（任意）<input name="note" maxlength="60" placeholder="例：航空券・ホテル代"></label>
+        <p class="hint" id="advance-preview"></p>
+        <button class="btn primary wide">まとめて記録する</button>
+      </form>
+    </details>
+    ${advances.length ? `<ul class="list">${advanceRows}</ul>` : ''}
     <details class="card manual loan">
       <summary>＋ お金を借りた・貸した記録を追加</summary>
       <p class="hint">「現金が足りなくてAさんに5,000円借りた」などを記録すると、最後の精算にまとめて反映されます。</p>
       <form id="loan-form">
         <div class="row">
-          <label class="grow">借りた人<select name="borrower">${d.members.map((m) => `<option value="${m.id}" ${m.id === state.me ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
-          <label class="grow">貸した人<select name="lender">${d.members.map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></label>
+          <label class="grow">借りた人<select name="borrower">${memberOptions(state.me)}</select></label>
+          <label class="grow">貸した人<select name="lender">${memberOptions(null)}</select></label>
         </div>
         <label>金額（円）<input name="amount" type="number" inputmode="numeric" min="1" step="1" required></label>
         <label>メモ（任意）<input name="note" maxlength="60" placeholder="例：タクシー代"></label>
         <button class="btn primary wide">記録する</button>
       </form>
     </details>
-    ${loans.length ? `<ul class="list">${rows}</ul>` : ''}`;
+    ${loans.length ? `<ul class="list">${loanRows}</ul>` : ''}`;
+}
+
+// 記録が済んだ入力欄の折りたたみを閉じる
+function closeSection(f) {
+  const det = f.closest('details');
+  if (!det) return;
+  formMemory.open.delete(det.querySelector('summary').textContent.trim());
+  det.open = false;
+}
+
+// 前払い金のフォームで、何人分・合計いくらになるかを出す
+function updateAdvancePreview() {
+  const f = document.getElementById('advance-form');
+  if (!f) return;
+  const from = [...f.querySelectorAll('input[name="advance_from"]:checked')].map((i) => i.value).filter((id) => id !== f.receiver.value);
+  const amount = Math.round(Number(f.amount.value));
+  document.getElementById('advance-preview').textContent = from.length && amount > 0
+    ? `${from.map(nameOf).join('・')} から ${yen(amount)} ずつ（合計 ${yen(amount * from.length)}）` : '';
+}
+
+async function saveAdvance(f) {
+  const receiver = f.receiver.value;
+  const amount = Math.round(Number(f.amount.value));
+  const from = [...f.querySelectorAll('input[name="advance_from"]:checked')].map((i) => i.value).filter((id) => id !== receiver);
+  if (!(amount > 0)) return toast('金額を入れてください');
+  if (!from.length) return toast('払った人を1人以上選んでください（受け取った人以外）');
+  await load();
+  const dup = state.data.payments.some((p) => p.kind === 'advance' && p.to_member_id === receiver
+    && Number(p.amount) === amount && localDate(p.created_at) === today() && from.includes(p.from_member_id));
+  if (dup && !confirm(`今日すでに同じ金額（${yen(amount)}）の前払い金が記録されています。二重入力ではありませんか？　このまま記録しますか？`)) return;
+  const note = f.note.value.trim() || null;
+  await check(state.db.from('payments').insert(from.map((id) => ({
+    group_id: state.gid, from_member_id: id, to_member_id: receiver, amount, kind: 'advance', note,
+  }))));
+  f.reset();
+  closeSection(f);
+  await refresh();
+  toast(`前払い金を${from.length}人分記録しました`);
 }
 
 function viewExpenseForm() {
@@ -1173,7 +1248,7 @@ function viewSettle() {
     return `<li class="item" data-act="open-person" data-id="${m.id}"><div class="main">${esc(m.name)}</div><div class="amt">${label}</div><span class="chev">›</span></li>`;
   }).join('');
 
-  const paid = d.payments.filter((p) => p.kind !== 'loan');
+  const paid = d.payments.filter((p) => p.kind === 'payment' || !p.kind);
   const history = paid.map((p) => `
     <li class="item">
       <div class="main">${esc(nameOf(p.from_member_id))} → ${esc(nameOf(p.to_member_id))}<div class="sub">${fmtTime(p.created_at)}</div></div>
@@ -1388,8 +1463,8 @@ function viewPerson() {
           ${line('自分の負担分', b.owed, '−')}
           ${line('その場で払った分', b.spotGave, '+')}
           ${line('その場で受け取った分', b.spotGot, '−')}
-          ${line('送金した・貸した', b.sent, '+')}
-          ${line('受け取った・借りた', b.received, '−')}
+          ${line('渡したお金（送金・前払い・貸した）', b.sent, '+')}
+          ${line('受け取ったお金（送金・前払い・借りた）', b.received, '−')}
           <tr class="total"><td>差し引き</td><td class="num">${net}</td></tr>
         </table>
         <h3>関わった支払い</h3>
@@ -1492,6 +1567,9 @@ function findDuplicates(date, amount, excludeId) {
   for (const p of d.payments) {
     if (p.kind === 'loan' && p.id !== excludeId && localDate(p.created_at) === date && Number(p.amount) === amount) {
       hits.push(`貸し借り「${nameOf(p.to_member_id)}が${nameOf(p.from_member_id)}から借りた」`);
+    }
+    if (p.kind === 'advance' && localDate(p.created_at) === date && Number(p.amount) === amount) {
+      hits.push(`前払い金「${nameOf(p.from_member_id)}から${nameOf(p.to_member_id)}へ」`);
     }
   }
   return hits;
@@ -1617,6 +1695,10 @@ function describeLog(l) {
       if (l.action === 'UPDATE' && l.old_detail) return `支払い「${r.title}」を変更：${expenseDiff(l.old_detail, r)}`;
       return `支払いを${A}：${r.title}（${yen(r.jpy_amount)}）`;
     case 'payments': {
+      if (r.kind === 'advance') {
+        const adv = `${nameOf(r.from_member_id)} → ${nameOf(r.to_member_id)} ${yen(r.amount)}${r.note ? `（${r.note}）` : ''}`;
+        return l.action === 'DELETE' ? `前払い金を削除：${adv}` : `前払い金を${A}：${adv}`;
+      }
       if (r.kind === 'loan') {
         const loan = `${nameOf(r.to_member_id)}が${nameOf(r.from_member_id)}から${yen(r.amount)}借りた${r.note ? `（${r.note}）` : ''}`;
         return l.action === 'DELETE' ? `貸し借りを削除：${loan}` : `貸し借りを${A}：${loan}`;
@@ -1843,6 +1925,15 @@ app.addEventListener('click', (ev) => {
       navigator.clipboard.writeText(text).then(() => toast('コピーしました'), () => prompt('コピーしてください', text));
       break;
     }
+    case 'delete-advance':
+      if (confirm('この前払い金の記録を削除しますか？')) {
+        run(async () => {
+          await check(state.db.from('payments').delete().eq('id', id));
+          await refresh();
+          offerUndo(id, '前払い金を削除しました');
+        });
+      }
+      break;
     case 'delete-loan':
       if (confirm('この貸し借りの記録を削除しますか？')) {
         run(async () => {
@@ -1905,10 +1996,12 @@ app.addEventListener('submit', (ev) => {
           group_id: state.gid, from_member_id: from, to_member_id: to, amount,
         }));
         f.reset();
+        closeSection(f);
         await refresh();
         toast('記録しました');
       });
       break;
+    case 'advance-form': run(() => saveAdvance(f)); break;
     case 'loan-form':
       run(async () => {
         const borrower = f.borrower.value;
@@ -1927,6 +2020,7 @@ app.addEventListener('submit', (ev) => {
           note: f.note.value.trim() || null,
         }));
         f.reset();
+        closeSection(f);
         await refresh();
         toast('記録しました');
       });
@@ -1946,6 +2040,7 @@ app.addEventListener('submit', (ev) => {
 app.addEventListener('change', (ev) => {
   const t = ev.target;
   if (t.closest('#expense-form')) updatePreview();
+  if (t.closest('#advance-form')) updateAdvancePreview();
   if (t.name === 'currency' && t.value !== 'JPY') run(fillRate);
   if (t.id === 'list-filter' || t.id === 'list-sort') {
     if (t.id === 'list-filter') state.listFilter = t.value;
@@ -1992,6 +2087,7 @@ window.addEventListener('pagehide', saveDraft);
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveDraft(); });
 
 app.addEventListener('input', (ev) => {
+  if (ev.target.closest('#advance-form')) updateAdvancePreview();
   if (ev.target.closest('#expense-form')) updatePreview();
 });
 

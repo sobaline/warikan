@@ -422,3 +422,11 @@ main > .seg { margin-bottom: 4px; }
 .pin-error { color: var(--minus); font-weight: 700; min-height: 1.2em; }
 .lock { font-size: 0.8em; }
 .pin-row { margin: -2px 0 10px; display: flex; gap: 10px; align-items: center; }
+
+/* 前払い金 */
+.manual.advance { background: var(--blue-soft); border: 1px solid var(--blue-soft); margin-bottom: 8px; }
+.manual.advance > summary { color: var(--blue); font-weight: 700; }
+.adv-head { background: var(--bg); }
+.adv-row .main { padding-left: 12px; }
+.manual + .list { margin-bottom: 12px; }
+.settle-line .sub { flex: none; white-space: nowrap; }
