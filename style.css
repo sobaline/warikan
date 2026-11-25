@@ -232,3 +232,41 @@ details summary { color: var(--sub); font-size: 0.9rem; cursor: pointer; margin-
 .manual { margin-top: 16px; padding: 14px; }
 .manual summary { margin: 0; }
 .manual form { margin-top: 12px; }
+.per-person { font-weight: 700; color: var(--accent); margin: -6px 0 14px; }
+
+.bar-btns { display: flex; gap: 6px; }
+.grouplink { color: var(--text); text-decoration: none; font-weight: 600; }
+.chev { color: var(--sub); font-size: 1.2rem; }
+.share-row { margin-top: 8px; }
+.share-row .btn { margin: 0; }
+.confirm-box { background: var(--card); border-radius: 12px; padding: 12px 14px; margin-top: 12px; font-size: 0.9rem; }
+.confirm-box.ok { background: #f0fdfa; }
+.confirm-box.warn { background: #fef3c7; border: 1px solid #fcd34d; }
+.confirm-box ul { margin: 8px 0; padding-left: 20px; }
+.confirm-box .link { margin-left: 8px; }
+.calc { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.calc td { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.calc .num { text-align: right; font-weight: 600; }
+.calc .total td { border-bottom: 0; font-weight: 700; padding-top: 10px; }
+.amt.small { font-size: 0.8rem; font-weight: 600; }
+.members { list-style: none; padding: 0; margin: 0 0 8px; }
+.members .row { margin-bottom: 8px; }
+.item.log.deleted .main { color: var(--sub); }
+
+.totals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.totals > div { background: var(--card); border-radius: 12px; padding: 10px 14px; }
+.totals b { font-size: 1.25rem; }
+.cats { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 0.85rem; color: var(--sub); margin-bottom: 4px; }
+.cats b { color: var(--text); }
+.day { display: flex; justify-content: space-between; align-items: baseline; margin: 20px 2px 0; }
+.day + .list { margin-top: 6px; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--bg); color: var(--sub); font-size: 0.75rem; }
+details.more { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 8px; }
+details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 12px; }
+.radios { display: flex; gap: 16px; margin-bottom: 10px; }
+.fixed-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text); margin-bottom: 8px; }
+.fixed-row input { width: 140px; margin: 0; }
+.fixed-row[hidden] { display: none; }
+#custom-preview.error { color: var(--minus); font-weight: 600; }
+.tips { margin-top: 16px; font-size: 0.85rem; color: var(--sub); }
+.tips p { margin-bottom: 8px; }

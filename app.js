@@ -1,6 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
-import { computeBalances, settleAuto, settleHub } from './settle.js';
+import {
+  computeBalances, computeBreakdown, splitExpense, settleAuto, settleHub,
+} from './settle.js';
 
 const app = document.getElementById('app');
 const CURRENCIES = ['JPY', 'USD', 'EUR', 'KRW', 'TWD', 'CNY', 'HKD', 'THB', 'SGD', 'GBP', 'AUD', 'PHP', 'VND'];
@@ -25,6 +27,30 @@ const fmtTime = (s) => new Date(s).toLocaleString('ja-JP', {
   month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
 });
 const today = () => new Date().toLocaleDateString('sv-SE');
+
+const localDate = (ts) => new Date(ts).toLocaleDateString('sv-SE');
+
+// 最近開いたグループ（この端末だけに保存）
+function recentGroups() {
+  try { return JSON.parse(lsGet('recent') || '[]'); } catch { return []; }
+}
+function rememberGroup(id, name) {
+  const list = recentGroups().filter((g) => g.id !== id);
+  list.unshift({ id, name, at: Date.now() });
+  lsSet('recent', JSON.stringify(list.slice(0, 20)));
+}
+function forgetGroup(id) {
+  lsSet('recent', JSON.stringify(recentGroups().filter((g) => g.id !== id)));
+}
+
+// 1人あたりの金額。割り切れないときは「3,333〜3,334円」のように幅で出す
+function perPerson(total, n) {
+  if (!n) return '';
+  const t = Math.round(Number(total) || 0);
+  const base = Math.floor(t / n);
+  if (t % n === 0) return yen(base);
+  return `${base.toLocaleString('ja-JP')}〜${yen(base + 1)}`;
+}
 
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -78,7 +104,8 @@ function makeClient(gid, me) {
   });
 }
 
-const groupUrl = () => `${location.origin}${location.pathname}#/g/${state.gid}`;
+// 共有用のURL。LINEで開いたときにSafariやChromeで開くよう ?openExternalBrowser=1 を付ける
+const groupUrl = () => `${location.origin}/?openExternalBrowser=1#/g/${state.gid}`;
 const nameOf = (id) => state.data?.members.find((m) => m.id === id)?.name ?? '不明';
 
 function sharesOf(expenseId) {
@@ -114,6 +141,45 @@ function settledStatus(e) {
   const done = settledOf(e).length;
   if (!others.length || !done) return null;
   return done >= others.length ? 'all' : 'some';
+}
+
+const CATEGORIES = ['食事', '交通', '宿', '観光・遊び', 'その他'];
+const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
+const nowTime = () => new Date().toTimeString().slice(0, 5);
+
+function dayLabel(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${m}/${d}（${WEEK[new Date(y, m - 1, d).getDay()]}）`;
+}
+
+// 個別金額（メンバーID → 円）。均等割りの支払いなら null
+function fixedOf(e) {
+  const rows = state.data.shares.filter((s) => s.expense_id === e.id && s.fixed_amount != null);
+  if (!rows.length) return null;
+  return new Map(rows.map((s) => [s.member_id, Number(s.fixed_amount)]));
+}
+
+function fixedMap() {
+  const map = new Map();
+  for (const e of state.data.expenses) {
+    const f = fixedOf(e);
+    if (f) map.set(e.id, f);
+  }
+  return map;
+}
+
+const calcOpts = () => ({ settled: settledMap(), fixed: fixedMap() });
+
+// その支払いで、一人ひとりが負担する金額
+function shareAmounts(e) {
+  return splitExpense(Math.round(Number(e.jpy_amount)), e.payer_id, sharesOf(e.id), fixedOf(e) || undefined);
+}
+
+// 新しい順（日付 → 時間 → 入力した順）
+function sortedExpenses() {
+  return [...state.data.expenses].sort((a, b) => b.paid_at.localeCompare(a.paid_at)
+    || (b.paid_time || '').localeCompare(a.paid_time || '')
+    || b.created_at.localeCompare(a.created_at));
 }
 
 /* ---------- データの読み込み ---------- */
@@ -168,6 +234,7 @@ async function openGroup(gid) {
       <a class="btn" href="#/">トップへ</a></div>`;
     return;
   }
+  if (state.data.group) rememberGroup(gid, state.data.group.name);
   if (state.me && !state.data.members.some((m) => m.id === state.me)) {
     state.me = null;
     state.db = makeClient(gid, null);
@@ -202,7 +269,15 @@ function renderTop() {
       <div id="member-inputs">${memberInput()}${memberInput()}${memberInput()}</div>
       <button type="button" class="btn ghost" data-act="add-member-input">＋ メンバーを追加</button>
       <button class="btn primary wide">グループを作る</button>
-    </form>`;
+    </form>
+    ${recentGroups().length ? `
+      <h3>最近開いたグループ</h3>
+      <ul class="list">${recentGroups().map((g) => `
+        <li class="item">
+          <a class="main grouplink" href="#/g/${esc(g.id)}">${esc(g.name)}</a>
+          <button class="x" data-act="forget-group" data-id="${esc(g.id)}" aria-label="一覧から外す">×</button>
+        </li>`).join('')}</ul>
+      <p class="hint">この端末で開いたグループだけが表示されます。×を押しても、グループ自体は消えません。</p>` : ''}`;
 }
 
 async function createGroup(form) {
@@ -269,44 +344,99 @@ function renderGroup() {
         <h1>${esc(d.group.name)}</h1>
         <button class="link" data-act="change-me">${esc(nameOf(state.me))} として参加中（変更）</button>
       </div>
-      <button class="btn small" data-act="share">共有</button>
+      <div class="bar-btns">
+        <button class="btn small ghost" data-act="open-members">メンバー</button>
+        <button class="btn small" data-act="share">共有</button>
+      </div>
     </header>
     <nav class="tabs">
       ${tabs.map(([k, l]) => `<button class="${state.tab === k ? 'on' : ''}" data-act="tab" data-tab="${k}">${l}</button>`).join('')}
     </nav>
     <main>${views[state.tab]()}</main>
-    ${state.view?.type === 'expense' ? viewExpenseForm() : ''}`;
+    ${viewSheet()}`;
   if (state.view?.type === 'expense') updatePreview();
+}
+
+function viewSheet() {
+  switch (state.view?.type) {
+    case 'expense': return viewExpenseForm();
+    case 'person': return viewPerson();
+    case 'members': return viewMembers();
+    default: return '';
+  }
 }
 
 /* 支払いタブ */
 
 function viewExpenses() {
   const d = state.data;
-  const total = d.expenses.reduce((s, e) => s + Number(e.jpy_amount), 0);
-  const items = d.expenses.map((e) => {
-    const n = sharesOf(e.id).length;
-    const st = settledStatus(e);
-    const stBadge = st === 'all' ? ' <span class="badge ok">精算済み</span>'
-      : st === 'some' ? ' <span class="badge ok">一部精算済み</span>' : '';
-    const foreign = e.currency !== 'JPY'
-      ? `<div class="sub">${Number(e.amount).toLocaleString('ja-JP')} ${esc(e.currency)}${e.jpy_confirmed ? '' : ' <span class="badge">仮</span>'}</div>`
-      : '';
+  const list = sortedExpenses();
+  const mine = (e) => shareAmounts(e).get(state.me) || 0;
+  const total = list.reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+  const myTotal = list.reduce((sum, e) => sum + mine(e), 0);
+  const avg = d.members.length ? Math.round(total / d.members.length) : 0;
+
+  // 種類別（どれか1件でも種類が付いているときだけ出す）
+  let cats = '';
+  if (list.some((e) => e.category)) {
+    const sums = new Map();
+    for (const e of list) {
+      const k = e.category || '未分類';
+      sums.set(k, (sums.get(k) || 0) + Math.round(Number(e.jpy_amount)));
+    }
+    const order = [...CATEGORIES, '未分類'].filter((k) => sums.has(k));
+    cats = `<div class="cats">${order.map((k) => `<span>${esc(k)} <b>${yen(sums.get(k))}</b></span>`).join('')}</div>`;
+  }
+
+  // 日付ごとに区切る
+  const days = [];
+  for (const e of list) {
+    let g = days[days.length - 1];
+    if (!g || g.date !== e.paid_at) {
+      g = { date: e.paid_at, items: [] };
+      days.push(g);
+    }
+    g.items.push(e);
+  }
+  const body = days.map((g) => {
+    const dayAll = g.items.reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+    const dayMine = g.items.reduce((sum, e) => sum + mine(e), 0);
     return `
-      <li class="item" data-act="edit-expense" data-id="${e.id}">
-        <div class="main">
-          <div class="title">${esc(e.title)}${stBadge}</div>
-          <div class="sub">${esc(nameOf(e.payer_id))}が立て替え・${n}人で割り勘・${esc(e.paid_at.slice(5).replace('-', '/'))}</div>
-        </div>
-        <div class="amt">${yen(e.jpy_amount)}${foreign}</div>
-      </li>`;
+      <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)} ／ 全体 ${yen(dayAll)}</span></div>
+      <ul class="list">${g.items.map(expenseRow).join('')}</ul>`;
   }).join('');
+
   return `
-    <div class="summary">合計 <b>${yen(total)}</b>（${d.expenses.length}件）</div>
+    <div class="totals">
+      <div><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b></div>
+      <div><div class="sub">全体（${list.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
+    </div>
+    ${cats}
     <button class="btn primary wide" data-act="new-expense">＋ 支払いを追加</button>
-    ${d.expenses.length ? `<ul class="list">${items}</ul>` : '<p class="empty">まだ支払いがありません</p>'}
-    ${d.expenses.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
+    ${list.length ? body : '<p class="empty">まだ支払いがありません</p>'}
+    ${list.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
     ${viewLoans()}`;
+}
+
+function expenseRow(e) {
+  const n = sharesOf(e.id).length;
+  const st = settledStatus(e);
+  const stBadge = st === 'all' ? ' <span class="badge ok">精算済み</span>'
+    : st === 'some' ? ' <span class="badge ok">一部精算済み</span>' : '';
+  const foreign = e.currency !== 'JPY'
+    ? `<div class="sub">${Number(e.amount).toLocaleString('ja-JP')} ${esc(e.currency)}${e.jpy_confirmed ? '' : ' <span class="badge">仮</span>'}</div>`
+    : '';
+  const how = fixedOf(e) ? '個別金額' : `1人${perPerson(e.jpy_amount, n)}`;
+  const time = e.paid_time ? `${e.paid_time.slice(0, 5)}・` : '';
+  const cat = e.category ? ` <span class="tag">${esc(e.category)}</span>` : '';
+  return `
+    <li class="item" data-act="edit-expense" data-id="${e.id}">
+      <div class="main">
+        <div class="title">${esc(e.title)}${stBadge}</div>
+        <div class="sub">${time}${esc(nameOf(e.payer_id))}が立て替え・${n}人（${how}）${cat}</div>
+      </div>
+      <div class="amt">${yen(e.jpy_amount)}${foreign}</div>
+    </li>`;
 }
 
 /* 貸し借り（payments の kind='loan' として記録する。貸した人→借りた人へお金が動いた扱い） */
@@ -348,27 +478,14 @@ function viewExpenseForm() {
   const shareIds = e ? sharesOf(e.id) : d.members.map((m) => m.id);
   const actual = e && e.currency !== 'JPY' && e.jpy_confirmed ? Number(e.jpy_amount) : '';
   const settledIds = e ? settledOf(e) : [];
+  const fixed = e ? fixedOf(e) : null;
+  const openMore = cur !== 'JPY' || !!fixed || settledIds.length > 0;
   return `
     <div class="sheet">
       <form id="expense-form" class="card">
         <h2>${e ? '支払いを編集' : '支払いを追加'}</h2>
         <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="例：夕食"></label>
-        <div class="row">
-          <label class="grow">金額<input name="amount" type="number" inputmode="decimal" min="0" step="any" required value="${e ? Number(e.amount) : ''}"></label>
-          <label>通貨<select name="currency">${CURRENCIES.map((c) => `<option ${c === cur ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
-        </div>
-        <div class="fx" ${cur === 'JPY' ? 'hidden' : ''}>
-          <label>レート（1通貨あたり何円）
-            <div class="row">
-              <input name="rate" type="number" inputmode="decimal" min="0" step="any" value="${e && e.currency !== 'JPY' ? Number(e.rate) : ''}">
-              <button type="button" class="btn small" data-act="fetch-rate">今日のレート</button>
-            </div>
-          </label>
-          <label>カード明細の実際の円額（わかったら入力）
-            <input name="jpy_actual" type="number" inputmode="numeric" min="0" step="1" value="${actual}" placeholder="入力すると、この金額で精算します">
-          </label>
-          <p class="hint" id="jpy-preview"></p>
-        </div>
+        <label>金額（<span id="cur-label">${esc(cur)}</span>）<input name="amount" type="number" inputmode="decimal" min="0" step="any" required value="${e ? Number(e.amount) : ''}"></label>
         <label>立て替えた人
           <select name="payer">${d.members.map((m) => `<option value="${m.id}" ${m.id === (e?.payer_id ?? state.me) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
         </label>
@@ -376,15 +493,56 @@ function viewExpenseForm() {
         <div class="checks">
           ${d.members.map((m) => `<label class="check"><input type="checkbox" name="share" value="${m.id}" ${shareIds.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('')}
         </div>
-        <details class="settled-box" ${settledIds.length ? 'open' : ''}>
-          <summary>その場で精算した人がいる</summary>
+        <p class="per-person" id="per-person"></p>
+
+        <details class="more" ${openMore ? 'open' : ''}>
+          <summary>詳細（日時・種類・通貨・個別金額・その場で精算）</summary>
+          <div class="row">
+            <label class="grow">日付<input name="paid_at" type="date" value="${esc(e?.paid_at ?? today())}"></label>
+            <label class="grow">時間<input name="paid_time" type="time" value="${esc(e ? (e.paid_time ?? '').slice(0, 5) : nowTime())}"></label>
+          </div>
+          <label>種類
+            <select name="category">
+              <option value="">未分類</option>
+              ${CATEGORIES.map((c) => `<option ${c === e?.category ? 'selected' : ''}>${c}</option>`).join('')}
+            </select>
+          </label>
+          <label>通貨<select name="currency">${CURRENCIES.map((c) => `<option ${c === cur ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+          <div class="fx" ${cur === 'JPY' ? 'hidden' : ''}>
+            <label>レート（1通貨あたり何円）
+              <div class="row">
+                <input name="rate" type="number" inputmode="decimal" min="0" step="any" value="${e && e.currency !== 'JPY' ? Number(e.rate) : ''}">
+                <button type="button" class="btn small" data-act="fetch-rate">今日のレート</button>
+              </div>
+            </label>
+            <label>カード明細の実際の円額（わかったら入力）
+              <input name="jpy_actual" type="number" inputmode="numeric" min="0" step="1" value="${actual}" placeholder="入力すると、この金額で精算します">
+            </label>
+            <p class="hint" id="jpy-preview"></p>
+          </div>
+
+          <div class="label">割り方</div>
+          <div class="radios">
+            <label class="check"><input type="radio" name="split" value="even" ${fixed ? '' : 'checked'}>均等</label>
+            <label class="check"><input type="radio" name="split" value="custom" ${fixed ? 'checked' : ''}>金額を個別に入力</label>
+          </div>
+          <div class="custom" ${fixed ? '' : 'hidden'}>
+            <p class="hint">食べた分などを1人ずつ円で入れてください。合計との差（シェアした料理や税など）は、割る人全員で均等に割ります。空欄は0円です。</p>
+            ${d.members.map((m) => `
+              <label class="fixed-row" data-member="${m.id}">${esc(m.name)}
+                <input name="fixed_${m.id}" type="number" inputmode="numeric" min="0" step="1" value="${fixed?.has(m.id) && fixed.get(m.id) ? fixed.get(m.id) : ''}">
+              </label>`).join('')}
+            <p class="hint" id="custom-preview"></p>
+          </div>
+
+          <div class="label">その場で精算した人</div>
           <p class="hint">立て替えた人にその場で自分の分を払った人にチェックを入れると、その人の分は最後の精算から外れます。</p>
           <label class="check"><input type="checkbox" id="settle-all">この会計は全員その場で精算済み</label>
           <div class="checks">
             ${d.members.map((m) => `<label class="check"><input type="checkbox" name="settled" value="${m.id}" ${settledIds.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('')}
           </div>
         </details>
-        <label>日付<input name="paid_at" type="date" value="${esc(e?.paid_at ?? today())}"></label>
+
         <div class="actions">
           ${e ? '<button type="button" class="btn danger" data-act="delete-expense">削除</button>' : ''}
           <span class="grow"></span>
@@ -395,17 +553,72 @@ function viewExpenseForm() {
     </div>`;
 }
 
+// 入力画面の今の値から、精算に使う円の金額を出す
+function formJpy(f) {
+  const amount = Number(f.amount.value);
+  if (f.currency.value === 'JPY') return Math.round(amount) || 0;
+  if (f.jpy_actual.value !== '') return Math.round(Number(f.jpy_actual.value)) || 0;
+  const rate = Number(f.rate.value);
+  return amount && rate ? Math.round(amount * rate) : 0;
+}
+
+const formShares = (f) => [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);
+const formCustom = (f) => f.querySelector('input[name="split"]:checked')?.value === 'custom';
+
+function formFixed(f, shares) {
+  const map = new Map();
+  for (const id of shares) {
+    const v = f.elements[`fixed_${id}`]?.value;
+    map.set(id, v ? Math.max(0, Math.round(Number(v)) || 0) : 0);
+  }
+  return map;
+}
+
 function updatePreview() {
   const f = document.getElementById('expense-form');
   if (!f) return;
   const cur = f.currency.value;
+  document.getElementById('cur-label').textContent = cur;
   f.querySelector('.fx').hidden = cur === 'JPY';
+
   const p = document.getElementById('jpy-preview');
   const amount = Number(f.amount.value);
   const rate = Number(f.rate.value);
   if (f.jpy_actual.value !== '') p.textContent = `精算には ${yen(f.jpy_actual.value)} を使います（確定）`;
   else if (amount && rate) p.textContent = `仮の円額：${yen(amount * rate)}（明細の金額がわかったら上に入力）`;
   else p.textContent = '';
+
+  const shares = formShares(f);
+  const custom = formCustom(f);
+  f.querySelector('.custom').hidden = !custom;
+  f.querySelectorAll('.fixed-row').forEach((row) => { row.hidden = !shares.includes(row.dataset.member); });
+
+  const pp = document.getElementById('per-person');
+  const cp = document.getElementById('custom-preview');
+  const jpy = formJpy(f);
+  cp.classList.remove('error');
+  if (!(jpy > 0) || !shares.length) {
+    pp.textContent = '';
+    cp.textContent = '';
+    return;
+  }
+  if (!custom) {
+    pp.textContent = `${shares.length}人で割ると 1人あたり ${perPerson(jpy, shares.length)}`;
+    cp.textContent = '';
+    return;
+  }
+  const fixed = formFixed(f, shares);
+  let sum = 0;
+  for (const v of fixed.values()) sum += v;
+  if (sum > jpy) {
+    pp.textContent = '';
+    cp.textContent = `個別の合計 ${yen(sum)} が、支払いの合計 ${yen(jpy)} を超えています`;
+    cp.classList.add('error');
+    return;
+  }
+  const parts = splitExpense(jpy, f.payer.value, shares, fixed);
+  cp.textContent = `個別の合計 ${yen(sum)}・残り ${yen(jpy - sum)} を${shares.length}人で均等に割ります`;
+  pp.textContent = shares.map((id) => `${nameOf(id)} ${yen(parts.get(id))}`).join('　');
 }
 
 async function fetchRate(cur) {
@@ -436,7 +649,7 @@ async function fillRate() {
 }
 
 async function saveExpense(f) {
-  const shares = [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);
+  const shares = formShares(f);
   if (!shares.length) return toast('誰の分かを1人以上選んでください');
   const title = f.title.value.trim();
   const amount = Number(f.amount.value);
@@ -458,6 +671,12 @@ async function saveExpense(f) {
     }
   }
 
+  const custom = formCustom(f);
+  const fixed = custom ? formFixed(f, shares) : new Map();
+  let fixedSum = 0;
+  for (const v of fixed.values()) fixedSum += v;
+  if (fixedSum > jpy) return toast('個別の金額の合計が、支払いの合計を超えています');
+
   const row = {
     group_id: state.gid,
     payer_id: f.payer.value,
@@ -468,7 +687,14 @@ async function saveExpense(f) {
     jpy_amount: jpy,
     jpy_confirmed: confirmed,
     paid_at: f.paid_at.value || today(),
+    paid_time: f.paid_time.value || null,
+    category: f.category.value || null,
   };
+
+  const orig = state.view.id ? state.data.expenses.find((x) => x.id === state.view.id) : null;
+  const unchanged = orig && orig.paid_at === row.paid_at && Math.round(Number(orig.jpy_amount)) === jpy;
+  if (!unchanged && !okToSaveDespiteDuplicates(row.paid_at, jpy, state.view.id)) return;
+
   const db = state.db;
   let id = state.view.id;
   if (id) {
@@ -483,6 +709,7 @@ async function saveExpense(f) {
     member_id: m,
     group_id: state.gid,
     settled: settled.includes(m) && m !== row.payer_id,
+    fixed_amount: custom ? fixed.get(m) : null,
   }))));
   state.view = null;
   await refresh();
@@ -494,7 +721,7 @@ async function saveExpense(f) {
 function currentPlan() {
   const d = state.data;
   const ids = d.members.map((m) => m.id);
-  const bal = computeBalances(ids, d.expenses, shareMap(), d.payments, settledMap());
+  const bal = computeBalances(ids, d.expenses, shareMap(), d.payments, calcOpts());
   const hub = ids.includes(d.group.hub_member_id) ? d.group.hub_member_id : null;
   const mode = d.group.settle_mode === 'hub' && hub ? 'hub' : 'auto';
   const plan = mode === 'hub' ? settleHub(bal, hub) : settleAuto(bal);
@@ -516,7 +743,7 @@ function viewSettle() {
     const v = bal.get(m.id) || 0;
     const label = v > 0 ? `<span class="plus">${yen(v)} 受け取る</span>`
       : v < 0 ? `<span class="minus">${yen(-v)} 払う</span>` : '<span class="sub">精算済み</span>';
-    return `<li class="item"><div class="main">${esc(m.name)}</div><div class="amt">${label}</div></li>`;
+    return `<li class="item" data-act="open-person" data-id="${m.id}"><div class="main">${esc(m.name)}</div><div class="amt">${label}</div><span class="chev">›</span></li>`;
   }).join('');
 
   const paid = d.payments.filter((p) => p.kind !== 'loan');
@@ -535,9 +762,15 @@ function viewSettle() {
     ${mode === 'hub' ? `<label class="inline">幹事
       <select id="hub-select">${d.members.map((m) => `<option value="${m.id}" ${m.id === hub ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
     </label>` : ''}
+    ${viewConfirmBox()}
     <h3>送金リスト</h3>
-    ${plan.length ? `<ul class="list">${rows}</ul>` : '<p class="empty">精算はすべて完了しています</p>'}
+    ${plan.length ? `<ul class="list">${rows}</ul>
+      <div class="row share-row">
+        <a class="btn small line grow" href="https://line.me/R/share?text=${encodeURIComponent(settleText(plan))}" target="_blank" rel="noopener">送金リストをLINEで送る</a>
+        <button class="btn small" data-act="copy-settle">コピー</button>
+      </div>` : '<p class="empty">精算はすべて完了しています</p>'}
     <h3>一人ひとりの差し引き</h3>
+    <p class="hint">名前を押すと、計算の内訳が見られます。</p>
     <ul class="list">${balRows}</ul>
     <details class="card manual">
       <summary>リスト以外で送金した分を記録する</summary>
@@ -569,6 +802,219 @@ async function markPaid(i) {
     group_id: state.gid, from_member_id: t.from, to_member_id: t.to, amount: t.amount,
   }));
   await refresh();
+}
+
+function settleText(plan) {
+  const lines = plan.map((t) => `${nameOf(t.from)} → ${nameOf(t.to)}　${yen(t.amount)}`);
+  return `【${state.data.group.name}】精算\n${lines.join('\n')}\n\n詳しくはこちら\n${groupUrl()}`;
+}
+
+/* 精算の確定と、確定後の変更の警告 */
+
+// 確定後に気をつけるべき変更：支払いと貸し借り（送金済みの記録は除く）
+function changesAfterConfirm() {
+  const at = state.data.group.confirmed_at;
+  if (!at) return [];
+  return state.data.logs.filter((l) => new Date(l.created_at) > new Date(at)
+    && (l.table_name === 'expenses' || (l.table_name === 'payments' && l.detail?.kind === 'loan')));
+}
+
+function viewConfirmBox() {
+  const g = state.data.group;
+  if (!g.confirmed_at) {
+    return `<div class="confirm-box">
+      <p class="hint">支払いが出そろったら確定しておくと、そのあとに誰かが支払いを変えたときにここで警告が出ます。</p>
+      <button class="btn small" data-act="confirm-settle">精算を確定する</button>
+    </div>`;
+  }
+  const changes = changesAfterConfirm();
+  const who = g.confirmed_by ? nameOf(g.confirmed_by) : '';
+  if (!changes.length) {
+    return `<div class="confirm-box ok">
+      <b>確定済み</b>（${fmtTime(g.confirmed_at)}${who ? `・${esc(who)}` : ''}）。確定後の変更はありません。
+      <button class="link" data-act="unconfirm">確定を取り消す</button>
+    </div>`;
+  }
+  return `<div class="confirm-box warn">
+    <b>確定後に ${changes.length} 件の変更があります</b>
+    <ul>${changes.map((l) => `<li>${esc(describeLog(l))}<span class="sub">（${fmtTime(l.created_at)}・${esc(l.member_id ? nameOf(l.member_id) : '不明')}）</span></li>`).join('')}</ul>
+    <p class="hint">内容に問題がなければ、確定し直すと警告が消えます。</p>
+    <button class="btn small" data-act="confirm-settle">この内容で確定し直す</button>
+  </div>`;
+}
+
+async function confirmSettle(on) {
+  const patch = on ? { confirmed_at: new Date().toISOString(), confirmed_by: state.me }
+    : { confirmed_at: null, confirmed_by: null };
+  await check(state.db.from('groups').update(patch).eq('id', state.gid));
+  await refresh();
+}
+
+/* 個人ごとの内訳 */
+
+function viewPerson() {
+  const d = state.data;
+  const id = state.view.id;
+  const ids = d.members.map((m) => m.id);
+  const b = computeBreakdown(ids, d.expenses, shareMap(), d.payments, calcOpts()).get(id);
+  const line = (label, v, sign) => (v ? `<tr><td>${label}</td><td class="num">${sign}${yen(v)}</td></tr>` : '');
+  const net = b.net > 0 ? `<span class="plus">${yen(b.net)} 受け取る</span>`
+    : b.net < 0 ? `<span class="minus">${yen(-b.net)} 払う</span>` : '精算済み';
+
+  const related = sortedExpenses().filter((e) => e.payer_id === id || sharesOf(e.id).includes(id)).map((e) => {
+    const ids2 = sharesOf(e.id);
+    const total = Math.round(Number(e.jpy_amount));
+    const n = ids2.length;
+    const mine = ids2.includes(id) ? shareAmounts(e).get(id) : 0;
+    const parts = [];
+    if (e.payer_id === id) parts.push(`立て替え ${yen(total)}`);
+    if (mine) parts.push(`負担 ${yen(mine)}`);
+    if (settledOf(e).includes(id)) parts.push('その場で精算済み');
+    return `<li class="item"><div class="main">${esc(e.title)}<div class="sub">${dayLabel(e.paid_at)}${e.paid_time ? ` ${e.paid_time.slice(0, 5)}` : ''}・${n}人${fixedOf(e) ? '（個別金額）' : 'で割り勘'}</div></div><div class="amt small">${parts.join('<br>')}</div></li>`;
+  }).join('');
+
+  return `
+    <div class="sheet">
+      <div class="card">
+        <h2>${esc(nameOf(id))} の内訳</h2>
+        <table class="calc">
+          ${line('立て替えた合計', b.paid, '+')}
+          ${line('自分の負担分', b.owed, '−')}
+          ${line('その場で払った分', b.spotGave, '+')}
+          ${line('その場で受け取った分', b.spotGot, '−')}
+          ${line('送金した・貸した', b.sent, '+')}
+          ${line('受け取った・借りた', b.received, '−')}
+          <tr class="total"><td>差し引き</td><td class="num">${net}</td></tr>
+        </table>
+        <h3>関わった支払い</h3>
+        ${related ? `<ul class="list">${related}</ul>` : '<p class="empty">まだありません</p>'}
+        <button class="btn ghost wide" data-act="close">閉じる</button>
+      </div>
+    </div>`;
+}
+
+/* メンバーの管理 */
+
+// 支払いや送金に関わっている人は、消すとデータが壊れるので削除できない
+function memberInUse(id) {
+  const d = state.data;
+  return d.expenses.some((e) => e.payer_id === id)
+    || d.shares.some((s) => s.member_id === id)
+    || d.payments.some((p) => p.from_member_id === id || p.to_member_id === id);
+}
+
+function viewMembers() {
+  const d = state.data;
+  return `
+    <div class="sheet">
+      <div class="card">
+        <h2>メンバー</h2>
+        <ul class="members">${d.members.map((m) => `
+          <li>
+            <form class="row member-form" data-id="${m.id}">
+              <input name="name" required maxlength="20" value="${esc(m.name)}">
+              <button class="btn small">名前を変更</button>
+              <button type="button" class="btn small danger" data-act="delete-member" data-id="${m.id}">削除</button>
+            </form>
+          </li>`).join('')}</ul>
+        <p class="hint">支払いや送金に関わっている人は削除できません。</p>
+        <h3>メンバーを追加</h3>
+        <form id="add-member-form" class="row">
+          <input name="name" required maxlength="20" placeholder="名前">
+          <button class="btn primary">追加</button>
+        </form>
+        <button class="btn ghost wide" data-act="close">閉じる</button>
+      </div>
+    </div>`;
+}
+
+async function renameMember(id, name) {
+  name = name.trim();
+  if (!name) return;
+  if (state.data.members.some((m) => m.name === name && m.id !== id)) return toast('同じ名前の人がいます');
+  await check(state.db.from('members').update({ name }).eq('id', id));
+  await refresh();
+  toast('名前を変更しました');
+}
+
+async function deleteMember(id) {
+  if (id === state.me) return toast('自分は削除できません');
+  if (memberInUse(id)) return toast('支払いや送金に関わっているため削除できません');
+  if (!confirm(`${nameOf(id)} をメンバーから削除しますか？`)) return;
+  await check(state.db.from('members').delete().eq('id', id));
+  await refresh();
+}
+
+async function addMember(name) {
+  name = name.trim();
+  if (!name) return;
+  if (state.data.members.some((m) => m.name === name)) return toast('同じ名前の人がいます');
+  await check(state.db.from('members').insert({ group_id: state.gid, name }));
+  await refresh();
+  toast('追加しました');
+}
+
+/* 二重入力の警告（支払いと貸し借りの両方を見る） */
+
+function findDuplicates(date, amount, excludeId) {
+  const d = state.data;
+  const hits = [];
+  for (const e of d.expenses) {
+    if (e.id !== excludeId && e.paid_at === date && Math.round(Number(e.jpy_amount)) === amount) {
+      hits.push(`支払い「${e.title}」（${nameOf(e.payer_id)}が立て替え）`);
+    }
+  }
+  for (const p of d.payments) {
+    if (p.kind === 'loan' && p.id !== excludeId && localDate(p.created_at) === date && Number(p.amount) === amount) {
+      hits.push(`貸し借り「${nameOf(p.to_member_id)}が${nameOf(p.from_member_id)}から借りた」`);
+    }
+  }
+  return hits;
+}
+
+function okToSaveDespiteDuplicates(date, amount, excludeId) {
+  const hits = findDuplicates(date, amount, excludeId);
+  if (!hits.length) return true;
+  return confirm(`同じ日付・同じ金額（${yen(amount)}）の記録がすでにあります。\n\n${hits.map((h) => `・${h}`).join('\n')}\n\n二重入力ではありませんか？　このまま保存しますか？`);
+}
+
+/* 削除した支払い・貸し借りの復元 */
+
+async function restoreFromLog(logId) {
+  const d = state.data;
+  const l = d.logs.find((x) => x.id === logId);
+  if (!l || l.action !== 'DELETE') return;
+  const r = l.detail || {};
+  if (l.table_name === 'expenses') {
+    if (d.expenses.some((e) => e.id === r.id)) return toast('すでに元に戻っています');
+    if (!d.members.some((m) => m.id === r.payer_id)) return toast('立て替えた人がもういないため戻せません');
+    if (!confirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`)) return;
+    const row = {};
+    for (const k of ['id', 'group_id', 'payer_id', 'title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'receipt_path', 'paid_at', 'paid_time', 'category', 'created_at']) {
+      if (k in r) row[k] = r[k];
+    }
+    await check(state.db.from('expenses').insert(row));
+    const memberIds = d.members.map((m) => m.id);
+    let shares = (r.shares || []).filter((s) => memberIds.includes(s.member_id));
+    if (!shares.length) {
+      shares = memberIds.map((id) => ({ member_id: id, settled: false }));
+      toast('割る人は全員に戻しました。必要なら直してください');
+    }
+    await check(state.db.from('expense_shares').insert(shares.map((s) => ({
+      expense_id: r.id, member_id: s.member_id, group_id: state.gid, settled: !!s.settled,
+      fixed_amount: s.fixed_amount ?? null,
+    }))));
+  } else if (l.table_name === 'payments') {
+    if (d.payments.some((p) => p.id === r.id)) return toast('すでに元に戻っています');
+    if (!confirm('この記録を元に戻しますか？')) return;
+    const row = {};
+    for (const k of ['id', 'group_id', 'from_member_id', 'to_member_id', 'amount', 'kind', 'note', 'created_at']) row[k] = r[k];
+    await check(state.db.from('payments').insert(row));
+  } else {
+    return;
+  }
+  await refresh();
+  toast('元に戻しました');
 }
 
 /* メモタブ */
@@ -607,13 +1053,32 @@ function viewMemo() {
 
 /* ログタブ */
 
+// 支払いの変更前→変更後を文章にする
+function expenseDiff(o, n) {
+  const out = [];
+  if (o.title !== n.title) out.push(`名前 ${o.title} → ${n.title}`);
+  if (Math.round(Number(o.jpy_amount)) !== Math.round(Number(n.jpy_amount))) out.push(`金額 ${yen(o.jpy_amount)} → ${yen(n.jpy_amount)}`);
+  if (o.currency !== n.currency || Number(o.amount) !== Number(n.amount)) {
+    if (o.currency !== 'JPY' || n.currency !== 'JPY') out.push(`元の金額 ${Number(o.amount).toLocaleString('ja-JP')} ${o.currency} → ${Number(n.amount).toLocaleString('ja-JP')} ${n.currency}`);
+  }
+  if (o.payer_id !== n.payer_id) out.push(`立て替えた人 ${nameOf(o.payer_id)} → ${nameOf(n.payer_id)}`);
+  if (o.paid_at !== n.paid_at) out.push(`日付 ${o.paid_at} → ${n.paid_at}`);
+  if ((o.paid_time || '') !== (n.paid_time || '')) out.push(`時間 ${(o.paid_time || 'なし').slice(0, 5)} → ${(n.paid_time || 'なし').slice(0, 5)}`);
+  if ((o.category || '') !== (n.category || '')) out.push(`種類 ${o.category || '未分類'} → ${n.category || '未分類'}`);
+  return out.length ? out.join('、') : '割る人などを変更';
+}
+
 function describeLog(l) {
   const r = l.detail || {};
   const A = { INSERT: '追加', UPDATE: '変更', DELETE: '削除' }[l.action] ?? l.action;
   switch (l.table_name) {
     case 'members':
+      if (l.action === 'UPDATE' && l.old_detail && l.old_detail.name !== r.name) {
+        return `メンバーの名前を変更：${l.old_detail.name} → ${r.name}`;
+      }
       return `メンバーを${A}：${r.name}`;
     case 'expenses':
+      if (l.action === 'UPDATE' && l.old_detail) return `支払い「${r.title}」を変更：${expenseDiff(l.old_detail, r)}`;
       return `支払いを${A}：${r.title}（${yen(r.jpy_amount)}）`;
     case 'payments': {
       if (r.kind === 'loan') {
@@ -635,12 +1100,21 @@ function describeLog(l) {
   }
 }
 
+function canRestore(l) {
+  if (l.action !== 'DELETE') return false;
+  const id = l.detail?.id;
+  if (l.table_name === 'expenses') return !state.data.expenses.some((e) => e.id === id);
+  if (l.table_name === 'payments') return !state.data.payments.some((p) => p.id === id);
+  return false;
+}
+
 function viewLog() {
   const logs = state.data.logs;
   if (!logs.length) return '<p class="empty">まだ記録がありません</p>';
   return `<ul class="list">${logs.map((l) => `
-    <li class="item log">
+    <li class="item log ${l.action === 'DELETE' ? 'deleted' : ''}">
       <div class="main">${esc(describeLog(l))}<div class="sub">${fmtTime(l.created_at)}・${esc(l.member_id ? nameOf(l.member_id) : '不明')}</div></div>
+      ${canRestore(l) ? `<button class="btn small" data-act="restore" data-id="${l.id}">元に戻す</button>` : ''}
     </li>`).join('')}</ul>`;
 }
 
@@ -658,6 +1132,10 @@ async function share() {
         <input readonly value="${esc(url)}" onclick="this.select()">
         <a class="btn primary wide line" href="${lineUrl}" target="_blank" rel="noopener">LINEで送る</a>
         <button class="btn wide" data-act="copy-url">URLをコピー</button>
+        <div class="tips">
+          <p><b>見失わないコツ：</b>LINEで送ったメッセージを長押しして「アナウンス」に登録すると、トークの上に固定されます。</p>
+          <p><b>ホーム画面に追加：</b>iPhoneはSafariの共有ボタン →「ホーム画面に追加」、Androidはメニュー →「ホーム画面に追加」で、アプリのように開けます。</p>
+        </div>
         <button class="btn ghost wide" data-act="close-share">閉じる</button>
       </div>
     </div>`);
@@ -723,6 +1201,20 @@ app.addEventListener('click', (ev) => {
         await refresh();
       });
       break;
+    case 'forget-group': forgetGroup(id); renderTop(); break;
+    case 'open-members': state.view = { type: 'members' }; render(); break;
+    case 'open-person': state.view = { type: 'person', id }; render(); break;
+    case 'delete-member': run(() => deleteMember(id)); break;
+    case 'restore': run(() => restoreFromLog(id)); break;
+    case 'confirm-settle': run(() => confirmSettle(true)); break;
+    case 'unconfirm':
+      if (confirm('確定を取り消しますか？')) run(() => confirmSettle(false));
+      break;
+    case 'copy-settle': {
+      const text = settleText(currentPlan().plan);
+      navigator.clipboard.writeText(text).then(() => toast('コピーしました'), () => prompt('コピーしてください', text));
+      break;
+    }
     case 'delete-loan':
       if (confirm('この貸し借りの記録を削除しますか？')) {
         run(async () => {
@@ -753,7 +1245,12 @@ app.addEventListener('click', (ev) => {
 app.addEventListener('submit', (ev) => {
   ev.preventDefault();
   const f = ev.target;
+  if (f.classList.contains('member-form')) {
+    run(() => renameMember(f.dataset.id, f.name.value));
+    return;
+  }
   switch (f.id) {
+    case 'add-member-form': run(() => addMember(f.name.value)); break;
     case 'create-form': run(() => createGroup(f)); break;
     case 'join-form': run(() => joinGroup(f)); break;
     case 'expense-form': run(() => saveExpense(f)); break;
@@ -784,6 +1281,7 @@ app.addEventListener('submit', (ev) => {
         const amount = Math.round(Number(f.amount.value));
         if (borrower === lender) return toast('借りた人と貸した人が同じです');
         if (!(amount > 0)) return toast('金額を入れてください');
+        if (!okToSaveDespiteDuplicates(today(), amount, null)) return;
         // 貸した人 → 借りた人 へお金が動いたので、貸した人が受け取る側になる
         await check(state.db.from('payments').insert({
           group_id: state.gid,
@@ -810,10 +1308,8 @@ app.addEventListener('submit', (ev) => {
 
 app.addEventListener('change', (ev) => {
   const t = ev.target;
-  if (t.name === 'currency') {
-    updatePreview();
-    if (t.value !== 'JPY') run(fillRate);
-  }
+  if (t.closest('#expense-form')) updatePreview();
+  if (t.name === 'currency' && t.value !== 'JPY') run(fillRate);
   if (t.id === 'settle-all') {
     const f = t.closest('form');
     const shares = [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);

@@ -1,6 +1,6 @@
 // 精算の計算（画面とは独立した部分）
 
-// 1つの支払いを、割る人たちに1円単位で配分する。
+// 金額を、割る人たちに1円単位で均等に配分する。
 // 割り切れない端数は、立て替えた人以外が先に1円ずつ多く持つ（払った人が損しないように）。
 export function splitShares(total, payerId, memberIds) {
   const result = new Map();
@@ -20,30 +20,63 @@ export function splitShares(total, payerId, memberIds) {
   return result;
 }
 
-// 各メンバーの差し引き。プラス＝受け取る、マイナス＝払う。
-// settledByExpense：支払いごとに「その場で払い済みの人」の集合。その人の分は精算から外す。
-export function computeBalances(memberIds, expenses, sharesByExpense, payments, settledByExpense = new Map()) {
-  const bal = new Map(memberIds.map((id) => [id, 0]));
-  const add = (id, v) => bal.set(id, (bal.get(id) || 0) + v);
+// 1つの支払いを配分する。
+// fixed：個別に入力した金額（メンバーID → 円）。合計から個別分を引いた残りを、割る人全員で均等に割る。
+export function splitExpense(total, payerId, memberIds, fixed = new Map()) {
+  const result = new Map();
+  if (memberIds.length === 0) return result;
+  let fixedSum = 0;
+  for (const id of memberIds) fixedSum += Math.max(0, Math.round(Number(fixed.get(id)) || 0));
+  const remainder = Math.max(0, total - fixedSum);
+  const even = splitShares(remainder, payerId, memberIds);
+  for (const id of memberIds) {
+    result.set(id, Math.max(0, Math.round(Number(fixed.get(id)) || 0)) + (even.get(id) || 0));
+  }
+  return result;
+}
+
+// 一人ひとりの内訳。
+// paid：立て替えた合計 / owed：自分の負担分（＝使ったお金） / spotGave・spotGot：その場で払った・受け取った
+// sent・received：送金や貸し借りで渡した・受け取った / net：差し引き（プラス＝受け取る、マイナス＝払う）
+// opts.settled：支払いID → その場で払い済みの人の集合
+// opts.fixed：支払いID → （メンバーID → 個別金額）
+export function computeBreakdown(memberIds, expenses, sharesByExpense, payments, opts = {}) {
+  const settledByExpense = opts.settled || new Map();
+  const fixedByExpense = opts.fixed || new Map();
+  const blank = () => ({ paid: 0, owed: 0, spotGave: 0, spotGot: 0, sent: 0, received: 0, net: 0 });
+  const r = new Map(memberIds.map((id) => [id, blank()]));
+  const get = (id) => {
+    if (!r.has(id)) r.set(id, blank());
+    return r.get(id);
+  };
   for (const e of expenses) {
     const ids = sharesByExpense.get(e.id) || [];
     if (ids.length === 0) continue;
     const total = Math.round(Number(e.jpy_amount));
     const settled = settledByExpense.get(e.id) || new Set();
-    add(e.payer_id, total);
-    for (const [id, v] of splitShares(total, e.payer_id, ids)) {
-      add(id, -v);
+    get(e.payer_id).paid += total;
+    for (const [id, v] of splitExpense(total, e.payer_id, ids, fixedByExpense.get(e.id))) {
+      get(id).owed += v;
       if (settled.has(id) && id !== e.payer_id) {
-        // その場で立て替えた人に払った分を打ち消す
-        add(id, v);
-        add(e.payer_id, -v);
+        get(id).spotGave += v;
+        get(e.payer_id).spotGot += v;
       }
     }
   }
   for (const p of payments) {
-    add(p.from_member_id, Number(p.amount));
-    add(p.to_member_id, -Number(p.amount));
+    get(p.from_member_id).sent += Number(p.amount);
+    get(p.to_member_id).received += Number(p.amount);
   }
+  for (const v of r.values()) {
+    v.net = v.paid - v.owed + v.spotGave - v.spotGot + v.sent - v.received;
+  }
+  return r;
+}
+
+// 各メンバーの差し引きだけを取り出す。
+export function computeBalances(memberIds, expenses, sharesByExpense, payments, opts = {}) {
+  const bal = new Map();
+  for (const [id, v] of computeBreakdown(memberIds, expenses, sharesByExpense, payments, opts)) bal.set(id, v.net);
   return bal;
 }
 
