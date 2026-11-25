@@ -270,3 +270,5 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 #custom-preview.error { color: var(--minus); font-weight: 600; }
 .tips { margin-top: 16px; font-size: 0.85rem; color: var(--sub); }
 .tips p { margin-bottom: 8px; }
+.add-row { margin-top: 12px; }
+.add-row .btn { margin: 0; }

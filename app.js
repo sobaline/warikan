@@ -175,6 +175,12 @@ function shareAmounts(e) {
   return splitExpense(Math.round(Number(e.jpy_amount)), e.payer_id, sharesOf(e.id), fixedOf(e) || undefined);
 }
 
+// 自分の買い物（立て替えた本人だけの支払い）。精算には影響せず、家計簿としてだけ数える
+function isPersonal(e) {
+  const ids = sharesOf(e.id);
+  return ids.length === 1 && ids[0] === e.payer_id;
+}
+
 // 新しい順（日付 → 時間 → 入力した順）
 function sortedExpenses() {
   return [...state.data.expenses].sort((a, b) => b.paid_at.localeCompare(a.paid_at)
@@ -372,15 +378,18 @@ function viewExpenses() {
   const d = state.data;
   const list = sortedExpenses();
   const mine = (e) => shareAmounts(e).get(state.me) || 0;
-  const total = list.reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+  const groupList = list.filter((e) => !isPersonal(e));
+  const groupSum = (items) => items.filter((e) => !isPersonal(e)).reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+  const total = groupSum(list);
   const myTotal = list.reduce((sum, e) => sum + mine(e), 0);
+  const myPersonal = list.filter((e) => isPersonal(e) && e.payer_id === state.me).reduce((sum, e) => sum + mine(e), 0);
   const avg = d.members.length ? Math.round(total / d.members.length) : 0;
 
   // 種類別（どれか1件でも種類が付いているときだけ出す）
   let cats = '';
-  if (list.some((e) => e.category)) {
+  if (groupList.some((e) => e.category)) {
     const sums = new Map();
-    for (const e of list) {
+    for (const e of groupList) {
       const k = e.category || '未分類';
       sums.set(k, (sums.get(k) || 0) + Math.round(Number(e.jpy_amount)));
     }
@@ -399,7 +408,7 @@ function viewExpenses() {
     g.items.push(e);
   }
   const body = days.map((g) => {
-    const dayAll = g.items.reduce((sum, e) => sum + Math.round(Number(e.jpy_amount)), 0);
+    const dayAll = groupSum(g.items);
     const dayMine = g.items.reduce((sum, e) => sum + mine(e), 0);
     return `
       <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)} ／ 全体 ${yen(dayAll)}</span></div>
@@ -408,11 +417,14 @@ function viewExpenses() {
 
   return `
     <div class="totals">
-      <div><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b></div>
-      <div><div class="sub">全体（${list.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
+      <div><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b>${myPersonal ? `<div class="sub">うち自分の買い物 ${yen(myPersonal)}</div>` : ''}</div>
+      <div><div class="sub">グループ全体（${groupList.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
     </div>
     ${cats}
-    <button class="btn primary wide" data-act="new-expense">＋ 支払いを追加</button>
+    <div class="row add-row">
+      <button class="btn primary grow" data-act="new-expense">＋ 支払いを追加</button>
+      <button class="btn" data-act="new-personal">＋ 自分の買い物</button>
+    </div>
     ${list.length ? body : '<p class="empty">まだ支払いがありません</p>'}
     ${list.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
     ${viewLoans()}`;
@@ -426,14 +438,19 @@ function expenseRow(e) {
   const foreign = e.currency !== 'JPY'
     ? `<div class="sub">${Number(e.amount).toLocaleString('ja-JP')} ${esc(e.currency)}${e.jpy_confirmed ? '' : ' <span class="badge">仮</span>'}</div>`
     : '';
-  const how = fixedOf(e) ? '個別金額' : `1人${perPerson(e.jpy_amount, n)}`;
+  const total = Math.round(Number(e.jpy_amount));
+  const myShare = shareAmounts(e).get(state.me);
+  // 割り切れないときは幅ではなく、自分の負担額をぴったりで出す
+  const how = fixedOf(e) ? '個別金額'
+    : total % n === 0 ? `1人${yen(total / n)}`
+      : myShare != null ? `あなた ${yen(myShare)}` : `1人${perPerson(total, n)}`;
   const time = e.paid_time ? `${e.paid_time.slice(0, 5)}・` : '';
   const cat = e.category ? ` <span class="tag">${esc(e.category)}</span>` : '';
   return `
     <li class="item" data-act="edit-expense" data-id="${e.id}">
       <div class="main">
         <div class="title">${esc(e.title)}${stBadge}</div>
-        <div class="sub">${time}${esc(nameOf(e.payer_id))}が立て替え・${n}人（${how}）${cat}</div>
+        <div class="sub">${time}${isPersonal(e) ? `${esc(nameOf(e.payer_id))}の買い物 <span class="tag">個人</span>` : `${esc(nameOf(e.payer_id))}が立て替え・${n}人（${how}）`}${cat}</div>
       </div>
       <div class="amt">${yen(e.jpy_amount)}${foreign}</div>
     </li>`;
@@ -475,7 +492,8 @@ function viewExpenseForm() {
   const d = state.data;
   const e = state.view.id ? d.expenses.find((x) => x.id === state.view.id) : null;
   const cur = e?.currency ?? 'JPY';
-  const shareIds = e ? sharesOf(e.id) : d.members.map((m) => m.id);
+  const personal = !e && state.view.personal;
+  const shareIds = e ? sharesOf(e.id) : personal ? [state.me] : d.members.map((m) => m.id);
   const actual = e && e.currency !== 'JPY' && e.jpy_confirmed ? Number(e.jpy_amount) : '';
   const settledIds = e ? settledOf(e) : [];
   const fixed = e ? fixedOf(e) : null;
@@ -483,8 +501,9 @@ function viewExpenseForm() {
   return `
     <div class="sheet">
       <form id="expense-form" class="card">
-        <h2>${e ? '支払いを編集' : '支払いを追加'}</h2>
-        <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="例：夕食"></label>
+        <h2>${e ? '支払いを編集' : personal ? '自分の買い物を追加' : '支払いを追加'}</h2>
+        ${personal ? '<p class="hint">自分だけの買い物は精算には影響せず、「あなたが使ったお金」にだけ足されます。グループのメンバーにも一覧で見えます。</p>' : ''}
+        <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="${personal ? '例：お土産' : '例：夕食'}"></label>
         <label>金額（<span id="cur-label">${esc(cur)}</span>）<input name="amount" type="number" inputmode="decimal" min="0" step="any" required value="${e ? Number(e.amount) : ''}"></label>
         <label>立て替えた人
           <select name="payer">${d.members.map((m) => `<option value="${m.id}" ${m.id === (e?.payer_id ?? state.me) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select>
@@ -603,7 +622,15 @@ function updatePreview() {
     return;
   }
   if (!custom) {
-    pp.textContent = `${shares.length}人で割ると 1人あたり ${perPerson(jpy, shares.length)}`;
+    if (shares.length === 1 && shares[0] === f.payer.value) {
+      pp.textContent = '自分だけの買い物（精算には影響しません）';
+    } else if (jpy % shares.length === 0) {
+      pp.textContent = `${shares.length}人で割ると 1人あたり ${yen(jpy / shares.length)}`;
+    } else {
+      // 割り切れないときは、誰が1円多いかがわかるよう名前つきで出す
+      const parts = splitExpense(jpy, f.payer.value, shares);
+      pp.textContent = `${shares.length}人で割ると　${shares.map((id) => `${nameOf(id)} ${yen(parts.get(id))}`).join('　')}`;
+    }
     cp.textContent = '';
     return;
   }
@@ -1172,6 +1199,7 @@ app.addEventListener('click', (ev) => {
     case 'copy-url': copyUrl(); break;
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
     case 'new-expense': state.view = { type: 'expense', id: null }; render(); break;
+    case 'new-personal': state.view = { type: 'expense', id: null, personal: true }; render(); break;
     case 'edit-expense': state.view = { type: 'expense', id }; render(); break;
     case 'close': state.view = null; render(); break;
     case 'fetch-rate': run(fillRate); break;
