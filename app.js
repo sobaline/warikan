@@ -406,6 +406,7 @@ function viewSheet() {
   switch (state.view?.type) {
     case 'expense': return viewExpenseForm();
     case 'person': return viewPerson();
+    case 'mine': return viewMine();
     case 'members': return viewMembers();
     default: return '';
   }
@@ -456,7 +457,7 @@ function viewExpenses() {
 
   return `
     <div class="totals">
-      <div><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b>${myPersonal ? `<div class="sub">うち自分の買い物 ${yen(myPersonal)}</div>` : ''}</div>
+      <div class="tap" data-act="open-mine"><div class="sub">あなたが使ったお金</div><b>${yen(myTotal)}</b>${myPersonal ? `<div class="sub">うち自分の買い物 ${yen(myPersonal)}</div>` : ''}<div class="more-link">わたしの家計簿 ›</div></div>
       <div><div class="sub">グループ全体（${groupList.length}件）</div><b>${yen(total)}</b><div class="sub">1人平均 ${yen(avg)}</div></div>
     </div>
     ${cats}
@@ -944,6 +945,62 @@ async function confirmSettle(on) {
   await refresh();
 }
 
+/* わたしの家計簿（自分の負担分だけを集計） */
+
+function viewMine() {
+  const me = state.me;
+  const items = sortedExpenses()
+    .map((e) => ({ e, v: shareAmounts(e).get(me) || 0 }))
+    .filter((x) => x.v > 0);
+  const total = items.reduce((sum, x) => sum + x.v, 0);
+  const personal = items.filter((x) => isPersonal(x.e)).reduce((sum, x) => sum + x.v, 0);
+
+  const sumBy = (key) => {
+    const m = new Map();
+    for (const x of items) m.set(key(x.e), (m.get(key(x.e)) || 0) + x.v);
+    return m;
+  };
+  const bars = (m, order, label) => {
+    const max = Math.max(...m.values(), 1);
+    return order.filter((k) => m.has(k)).map((k) => `
+      <li class="bar-row">
+        <span class="bar-label">${esc(label(k))}</span>
+        <span class="bar"><span style="width:${Math.max(2, Math.round((m.get(k) / max) * 100))}%"></span></span>
+        <span class="bar-val">${yen(m.get(k))}</span>
+      </li>`).join('');
+  };
+  const byCat = sumBy((e) => e.category || '未分類');
+  const byDay = sumBy((e) => e.paid_at);
+  const days = [...byDay.keys()].sort();
+
+  const rows = items.map(({ e, v }) => `
+    <li class="item" data-act="edit-expense" data-id="${e.id}">
+      <div class="main">
+        <div class="title">${esc(e.title)}${isPersonal(e) ? ' <span class="tag">個人</span>' : ''}</div>
+        <div class="sub">${dayLabel(e.paid_at)}${e.paid_time ? ` ${e.paid_time.slice(0, 5)}` : ''}${isPersonal(e) ? '' : `・${yen(e.jpy_amount)}のうち`}${e.category ? `・${esc(e.category)}` : ''}</div>
+      </div>
+      <div class="amt">${yen(v)}</div>
+    </li>`).join('');
+
+  return `
+    <div class="sheet">
+      <div class="card">
+        <h2>わたしの家計簿</h2>
+        <p class="sub">「${esc(state.data.group.name)}」で${esc(nameOf(me))}が使ったお金（自分の負担分）</p>
+        <div class="mine-total"><b>${yen(total)}</b>
+          <span class="sub">割り勘 ${yen(total - personal)} ／ 自分の買い物 ${yen(personal)}</span></div>
+        ${items.length ? `
+          <h3>種類別</h3>
+          <ul class="bars">${bars(byCat, [...CATEGORIES, '未分類'], (k) => k)}</ul>
+          ${days.length > 1 ? `<h3>日別</h3><ul class="bars">${bars(byDay, days, dayLabel)}</ul>` : ''}
+          <h3>明細（${items.length}件）</h3>
+          <ul class="list">${rows}</ul>
+          <p class="hint">種類は、支払いを開いて「詳細」から付けたり変えたりできます。</p>` : '<p class="empty">まだありません</p>'}
+        <button class="btn ghost wide" data-act="close">閉じる</button>
+      </div>
+    </div>`;
+}
+
 /* 個人ごとの内訳 */
 
 function viewPerson() {
@@ -1246,6 +1303,42 @@ async function copyUrl() {
 
 /* ---------- 操作の受け付け ---------- */
 
+/* 折りたたみ（詳細など）を、なめらかにスライドして開閉する */
+const reduceMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+function slideDetails(det) {
+  if (det._anim) {
+    det._anim.cancel();
+    det._anim = null;
+  }
+  const opening = !det.open;
+  const start = det.offsetHeight;
+  det.open = true;                 // 開いた状態の高さを測るため、いったん開く
+  const full = det.offsetHeight;
+  det.open = opening;
+  const end = opening ? full : det.offsetHeight;
+  det.open = true;                 // 閉じるときも、動いている間は中身を見せておく
+  det.style.overflow = 'hidden';
+  det._anim = det.animate(
+    [{ height: `${start}px` }, { height: `${end}px` }],
+    { duration: 260, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' },
+  );
+  det._anim.onfinish = () => {
+    det.open = opening;
+    det.style.overflow = '';
+    det._anim = null;
+  };
+}
+
+app.addEventListener('click', (ev) => {
+  const summary = ev.target.closest('summary');
+  if (!summary || reduceMotion()) return;
+  const det = summary.parentElement;
+  if (det?.tagName !== 'DETAILS') return;
+  ev.preventDefault();
+  slideDetails(det);
+});
+
 app.addEventListener('click', (ev) => {
   const t = ev.target.closest('[data-act]');
   if (!t) return;
@@ -1266,6 +1359,7 @@ app.addEventListener('click', (ev) => {
     case 'copy-url': copyUrl(); break;
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
     case 'new-expense': state.view = { type: 'expense', id: null }; render(); break;
+    case 'open-mine': state.view = { type: 'mine' }; render(); break;
     case 'new-personal': state.view = { type: 'expense', id: null, personal: true }; render(); break;
     case 'edit-expense': state.view = { type: 'expense', id, snapshot: expenseSnapshot(id) }; render(); break;
     case 'close': state.view = null; render(); break;

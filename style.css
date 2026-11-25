@@ -276,3 +276,25 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 /* 貸し借りのボタン：控えめなオレンジ */
 .manual.loan { background: #fff7ed; border: 1px solid #fed7aa; }
 .manual.loan > summary { color: #c2410c; font-weight: 700; }
+
+/* わたしの家計簿 */
+.tap { cursor: pointer; }
+.tap:active { background: var(--bg); }
+.more-link { margin-top: 4px; font-size: 0.8rem; font-weight: 700; color: var(--accent); }
+.mine-total { margin: 8px 0 4px; }
+.mine-total b { display: block; font-size: 1.8rem; }
+.bars { list-style: none; padding: 0; margin: 0; }
+.bar-row { display: grid; grid-template-columns: 5.5em 1fr auto; align-items: center; gap: 10px; padding: 5px 0; font-size: 0.9rem; }
+.bar-label { color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar { height: 10px; background: var(--bg); border-radius: 5px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.bar-val { font-weight: 700; text-align: right; min-width: 6em; }
+
+/* 下から出てくる画面は、すっと持ち上がるように */
+@keyframes sheet-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes sheet-fade { from { background: rgb(0 0 0 / 0); } to { background: rgb(0 0 0 / 0.4); } }
+.sheet { animation: sheet-fade 0.2s ease-out; }
+.sheet .card { animation: sheet-up 0.26s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .sheet, .sheet .card { animation: none; }
+}
