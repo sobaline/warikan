@@ -151,6 +151,9 @@ function settledStatus(e) {
 }
 
 const CATEGORIES = ['食事', '交通', '宿', '観光・遊び', 'その他'];
+const PAGE_SIZE = 5;      // 支払い一覧で最初に出す件数
+const PAGE_STEP = 10;     // 「もっと見る」で増やす件数
+const LOG_PAGE = 20;      // ログで最初に出す件数
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
 const nowTime = () => new Date().toTimeString().slice(0, 5);
 
@@ -266,6 +269,9 @@ function route() {
 }
 
 async function openGroup(gid) {
+  state.showCount = PAGE_SIZE;
+  state.logCount = LOG_PAGE;
+  state.logFilter = 'all';
   formMemory.forms = {};
   formMemory.open = new Set();
   state.gid = gid;
@@ -560,13 +566,23 @@ function viewExpenses() {
     }
     g.items.push(e);
   }
+  // 新しいものから決まった件数だけ出し、残りは「もっと見る」で出す
+  const limit = state.showCount || PAGE_SIZE;
+  let shown = 0;
   const body = days.map((g) => {
+    if (shown >= limit) return '';
+    const visibleItems = g.items.slice(0, limit - shown);
+    shown += visibleItems.length;
     const dayAll = groupSum(g.items);
     const dayMine = g.items.reduce((sum, e) => sum + mine(e), 0);
     return `
       <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)} ／ 全体 ${yen(dayAll)}</span></div>
-      <ul class="list">${g.items.map(expenseRow).join('')}</ul>`;
+      <ul class="list">${visibleItems.map(expenseRow).join('')}</ul>`;
   }).join('');
+  const rest = list.length - shown;
+  const more = rest > 0
+    ? `<button class="btn ghost wide more-btn" data-act="show-more">もっと見る（残り${rest}件）</button>`
+    : '';
 
   return `
     <div class="totals">
@@ -578,7 +594,7 @@ function viewExpenses() {
       <button class="btn primary grow" data-act="new-expense">＋ 支払いを追加</button>
       <button class="btn" data-act="new-personal">＋ 自分の買い物</button>
     </div>
-    ${list.length ? body : '<p class="empty">まだ支払いがありません</p>'}
+    ${list.length ? body + more : '<p class="empty">まだ支払いがありません</p>'}
     ${list.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
     ${viewLoans()}`;
 }
@@ -1090,14 +1106,31 @@ function viewMine() {
   const byDay = sumBy((e) => e.paid_at);
   const days = [...byDay.keys()].sort();
 
-  const rows = items.map(({ e, v }) => `
+  // 種類ごとに、最初は金額だけを見せて閉じておく
+  const maxCat = Math.max(...byCat.values(), 1);
+  const genres = [...CATEGORIES, '未分類'].filter((k) => byCat.has(k)).map((k) => {
+    const its = items.filter((x) => (x.e.category || '未分類') === k);
+    return `
+      <details class="genre">
+        <summary>
+          <span class="g-name">${esc(k)}<span class="sub">（${its.length}件）</span></span>
+          <span class="bar"><span style="width:${Math.max(2, Math.round((byCat.get(k) / maxCat) * 100))}%"></span></span>
+          <span class="g-val">${yen(byCat.get(k))}</span>
+        </summary>
+        <ul class="list">${its.map(mineRow).join('')}</ul>
+      </details>`;
+  }).join('');
+
+  function mineRow({ e, v }) {
+    return `
     <li class="item" data-act="edit-expense" data-id="${e.id}">
       <div class="main">
         <div class="title">${esc(e.title)}${isPersonal(e) ? ' <span class="tag">個人</span>' : ''}</div>
-        <div class="sub">${dayLabel(e.paid_at)}${e.paid_time ? ` ${e.paid_time.slice(0, 5)}` : ''}${isPersonal(e) ? '' : `・${yen(e.jpy_amount)}のうち`}${e.category ? `・${esc(e.category)}` : ''}</div>
+        <div class="sub">${dayLabel(e.paid_at)}${e.paid_time ? ` ${e.paid_time.slice(0, 5)}` : ''}${isPersonal(e) ? '' : `・${yen(e.jpy_amount)}のうち`}</div>
       </div>
       <div class="amt">${yen(v)}</div>
-    </li>`).join('');
+    </li>`;
+  }
 
   return `
     <div class="sheet">
@@ -1108,11 +1141,9 @@ function viewMine() {
           <span class="sub">割り勘 ${yen(total - personal)} ／ 自分の買い物 ${yen(personal)}</span></div>
         ${items.length ? `
           <h3>種類別</h3>
-          <ul class="bars">${bars(byCat, [...CATEGORIES, '未分類'], (k) => k)}</ul>
-          ${days.length > 1 ? `<h3>日別</h3><ul class="bars">${bars(byDay, days, dayLabel)}</ul>` : ''}
-          <h3>明細（${items.length}件）</h3>
-          <ul class="list">${rows}</ul>
-          <p class="hint">種類は、支払いを開いて「詳細」から付けたり変えたりできます。</p>` : '<p class="empty">まだありません</p>'}
+          <div class="genres">${genres}</div>
+          <p class="hint">種類を押すと明細が開きます。種類は、支払いを開いて「詳細」から付けたり変えたりできます。</p>
+          ${days.length > 1 ? `<h3>日別</h3><ul class="bars">${bars(byDay, days, dayLabel)}</ul>` : ''}` : '<p class="empty">まだありません</p>'}
         <button class="btn ghost wide" data-act="close">閉じる</button>
       </div>
     </div>`;
@@ -1322,18 +1353,25 @@ function viewMemo() {
 /* ログタブ */
 
 // 支払いの変更前→変更後を文章にする
-function expenseDiff(o, n) {
+// 支払いの変更点を { 項目, 前, 後 } の一覧にする
+function expenseChanges(o, n) {
   const out = [];
-  if (o.title !== n.title) out.push(`名前 ${o.title} → ${n.title}`);
-  if (Math.round(Number(o.jpy_amount)) !== Math.round(Number(n.jpy_amount))) out.push(`金額 ${yen(o.jpy_amount)} → ${yen(n.jpy_amount)}`);
-  if (o.currency !== n.currency || Number(o.amount) !== Number(n.amount)) {
-    if (o.currency !== 'JPY' || n.currency !== 'JPY') out.push(`元の金額 ${Number(o.amount).toLocaleString('ja-JP')} ${o.currency} → ${Number(n.amount).toLocaleString('ja-JP')} ${n.currency}`);
+  const add = (label, a, b) => out.push({ label, from: a, to: b });
+  if (o.title !== n.title) add('名前', o.title, n.title);
+  if (Math.round(Number(o.jpy_amount)) !== Math.round(Number(n.jpy_amount))) add('金額', yen(o.jpy_amount), yen(n.jpy_amount));
+  if ((o.currency !== n.currency || Number(o.amount) !== Number(n.amount)) && (o.currency !== 'JPY' || n.currency !== 'JPY')) {
+    add('元の金額', `${Number(o.amount).toLocaleString('ja-JP')} ${o.currency}`, `${Number(n.amount).toLocaleString('ja-JP')} ${n.currency}`);
   }
-  if (o.payer_id !== n.payer_id) out.push(`立て替えた人 ${nameOf(o.payer_id)} → ${nameOf(n.payer_id)}`);
-  if (o.paid_at !== n.paid_at) out.push(`日付 ${o.paid_at} → ${n.paid_at}`);
-  if ((o.paid_time || '') !== (n.paid_time || '')) out.push(`時間 ${(o.paid_time || 'なし').slice(0, 5)} → ${(n.paid_time || 'なし').slice(0, 5)}`);
-  if ((o.category || '') !== (n.category || '')) out.push(`種類 ${o.category || '未分類'} → ${n.category || '未分類'}`);
-  return out.length ? out.join('、') : '割る人などを変更';
+  if (o.payer_id !== n.payer_id) add('立て替えた人', nameOf(o.payer_id), nameOf(n.payer_id));
+  if (o.paid_at !== n.paid_at) add('日付', o.paid_at, n.paid_at);
+  if ((o.paid_time || '') !== (n.paid_time || '')) add('時間', (o.paid_time || 'なし').slice(0, 5), (n.paid_time || 'なし').slice(0, 5));
+  if ((o.category || '') !== (n.category || '')) add('種類', o.category || '未分類', n.category || '未分類');
+  return out;
+}
+
+function expenseDiff(o, n) {
+  const ch = expenseChanges(o, n);
+  return ch.length ? ch.map((c) => `${c.label} ${c.from} → ${c.to}`).join('、') : '割る人などを変更';
 }
 
 function describeLog(l) {
@@ -1377,13 +1415,38 @@ function canRestore(l) {
 }
 
 function viewLog() {
-  const logs = state.data.logs;
-  if (!logs.length) return '<p class="empty">まだ記録がありません</p>';
-  return `<ul class="list">${logs.map((l) => `
-    <li class="item log ${l.action === 'DELETE' ? 'deleted' : ''}">
-      <div class="main">${esc(describeLog(l))}<div class="sub">${fmtTime(l.created_at)}・${esc(l.member_id ? nameOf(l.member_id) : '不明')}</div></div>
-      ${canRestore(l) ? `<button class="btn small" data-act="restore" data-id="${l.id}">元に戻す</button>` : ''}
-    </li>`).join('')}</ul>`;
+  const all = state.data.logs;
+  if (!all.length) return '<p class="empty">まだ記録がありません</p>';
+  const filter = state.logFilter || 'all';
+  const logs = filter === 'changes' ? all.filter((l) => l.action !== 'INSERT') : all;
+  const count = state.logCount || LOG_PAGE;
+  const LABEL = { INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'] };
+
+  const row = (l) => {
+    const [label, cls] = LABEL[l.action] || [l.action, ''];
+    // 支払いの変更は、項目ごとに「前 → 後」を並べて見せる
+    let body = esc(describeLog(l));
+    if (l.table_name === 'expenses' && l.action === 'UPDATE' && l.old_detail) {
+      const ch = expenseChanges(l.old_detail, l.detail || {});
+      body = `支払い「${esc(l.detail?.title)}」${ch.length ? `<div class="diffs">${ch.map((c) => `
+        <div class="diff"><span class="d-label">${esc(c.label)}</span><s>${esc(c.from)}</s> → <b>${esc(c.to)}</b></div>`).join('')}</div>` : '<div class="sub">割る人などを変更</div>'}`;
+    }
+    return `
+      <li class="item log ${l.action === 'DELETE' ? 'deleted' : ''}">
+        <span class="act ${cls}">${label}</span>
+        <div class="main">${body}<div class="sub">${fmtTime(l.created_at)}・${esc(l.member_id ? nameOf(l.member_id) : '不明')}</div></div>
+        ${canRestore(l) ? `<button class="btn small" data-act="restore" data-id="${l.id}">元に戻す</button>` : ''}
+      </li>`;
+  };
+
+  const changes = all.filter((l) => l.action !== 'INSERT').length;
+  return `
+    <div class="seg">
+      <button class="${filter === 'all' ? 'on' : ''}" data-act="log-filter" data-filter="all">すべて（${all.length}）</button>
+      <button class="${filter === 'changes' ? 'on' : ''}" data-act="log-filter" data-filter="changes">変更・削除だけ（${changes}）</button>
+    </div>
+    ${logs.length ? `<ul class="list">${logs.slice(0, count).map(row).join('')}</ul>` : '<p class="empty">変更や削除はまだありません</p>'}
+    ${logs.length > count ? `<button class="btn ghost wide more-btn" data-act="log-more">もっと見る（残り${logs.length - count}件）</button>` : ''}`;
 }
 
 /* ---------- 共有 ---------- */
@@ -1472,6 +1535,9 @@ app.addEventListener('click', (ev) => {
       render();
       break;
     case 'tab': state.tab = t.dataset.tab; render(); break;
+    case 'show-more': state.showCount = (state.showCount || PAGE_SIZE) + PAGE_STEP; render(); break;
+    case 'log-filter': state.logFilter = t.dataset.filter; state.logCount = LOG_PAGE; render(); break;
+    case 'log-more': state.logCount = (state.logCount || LOG_PAGE) + LOG_PAGE; render(); break;
     case 'share': share(); break;
     case 'copy-url': copyUrl(); break;
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
