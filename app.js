@@ -179,7 +179,7 @@ const calcOpts = () => ({ settled: settledMap(), fixed: fixedMap() });
 
 // その支払いで、一人ひとりが負担する金額
 function shareAmounts(e) {
-  return splitExpense(Math.round(Number(e.jpy_amount)), e.payer_id, sharesOf(e.id), fixedOf(e) || undefined);
+  return splitExpense(Math.round(Number(e.jpy_amount)), e.payer_id, sharesOf(e.id), fixedOf(e) || undefined, e.id);
 }
 
 // 編集を始めた時点の支払いの中身（同時編集に気づくため）
@@ -480,7 +480,7 @@ function applyFormState(st) {
 function saveDraft() {
   if (!state.gid || !state.me || !state.data?.group || !app.querySelector('.tabs')) return;
   rememberForms();
-  const view = state.view?.type === 'expense' ? { id: state.view.id, personal: !!state.view.personal } : null;
+  const view = state.view?.type === 'expense' ? { id: state.view.id, newId: state.view.newId, personal: !!state.view.personal } : null;
   const forms = { ...formMemory.forms };
   if (!view) delete forms['expense-form'];
   lsSet(`draft:${state.gid}`, JSON.stringify({
@@ -502,7 +502,7 @@ function restoreDraft() {
   if (d.tab) state.tab = d.tab;
   let typed = false;
   if (d.view && (!d.view.id || state.data.allExpenses.some((e) => e.id === d.view.id))) {
-    state.view = { type: 'expense', id: d.view.id, personal: d.view.personal };
+    state.view = { type: 'expense', id: d.view.id, newId: d.view.newId || uuid(), personal: d.view.personal };
     if (d.view.id) state.view.snapshot = expenseSnapshot(d.view.id);
     typed = true;
   }
@@ -733,6 +733,9 @@ function formJpy(f) {
   return amount && rate ? Math.round(amount * rate) : 0;
 }
 
+// 入力中の支払いのID（新しい支払いは、画面を開いたときに決めておく）
+const formSeed = () => state.view?.id || state.view?.newId || '';
+
 const formShares = (f) => [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);
 const formCustom = (f) => f.querySelector('input[name="split"]:checked')?.value === 'custom';
 
@@ -780,7 +783,7 @@ function updatePreview() {
       pp.textContent = `${shares.length}人で割ると 1人あたり ${yen(jpy / shares.length)}`;
     } else {
       // 割り切れないときは、誰が1円多いかがわかるよう名前つきで出す
-      const parts = splitExpense(jpy, f.payer.value, shares);
+      const parts = splitExpense(jpy, f.payer.value, shares, undefined, formSeed());
       pp.textContent = `${shares.length}人で割ると　${shares.map((id) => `${nameOf(id)} ${yen(parts.get(id))}`).join('　')}`;
     }
     cp.textContent = '';
@@ -795,7 +798,7 @@ function updatePreview() {
     cp.classList.add('error');
     return;
   }
-  const parts = splitExpense(jpy, f.payer.value, shares, fixed);
+  const parts = splitExpense(jpy, f.payer.value, shares, fixed, formSeed());
   cp.textContent = `個別の合計 ${yen(sum)}・残り ${yen(jpy - sum)} を${shares.length}人で均等に割ります`;
   pp.textContent = shares.map((id) => `${nameOf(id)} ${yen(parts.get(id))}`).join('　');
 }
@@ -903,7 +906,7 @@ async function saveExpense(f) {
     await check(db.from('expenses').update(row).eq('id', id));
     await check(db.from('expense_shares').delete().eq('expense_id', id));
   } else {
-    id = (await check(db.from('expenses').insert(row).select('id').single())).id;
+    id = (await check(db.from('expenses').insert({ ...row, id: formSeed() }).select('id').single())).id;
   }
   const settled = [...f.querySelectorAll('input[name="settled"]:checked')].map((i) => i.value);
   await check(db.from('expense_shares').insert(shares.map((m) => ({
@@ -1472,9 +1475,9 @@ app.addEventListener('click', (ev) => {
     case 'share': share(); break;
     case 'copy-url': copyUrl(); break;
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
-    case 'new-expense': state.view = { type: 'expense', id: null }; render(); break;
+    case 'new-expense': state.view = { type: 'expense', id: null, newId: uuid() }; render(); break;
     case 'open-mine': state.view = { type: 'mine' }; render(); break;
-    case 'new-personal': state.view = { type: 'expense', id: null, personal: true }; render(); break;
+    case 'new-personal': state.view = { type: 'expense', id: null, newId: uuid(), personal: true }; render(); break;
     case 'edit-expense': state.view = { type: 'expense', id, snapshot: expenseSnapshot(id) }; render(); break;
     case 'close': state.view = null; render(); break;
     case 'fetch-rate': run(fillRate); break;

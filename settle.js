@@ -1,15 +1,28 @@
 // 精算の計算（画面とは独立した部分）
 
+// 文字列から決まった数を作る（同じ文字列なら必ず同じ数）
+function hash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 // 金額を、割る人たちに1円単位で均等に配分する。
-// 割り切れない端数は、立て替えた人以外が先に1円ずつ多く持つ（払った人が損しないように）。
-export function splitShares(total, payerId, memberIds) {
+// 割り切れない端数の1円は、立て替えた人以外から「くじ」で選んだ人が持つ。
+// くじは支払いID（seed）で決まるので、同じ支払いなら誰の画面でも何度開いても同じ結果になり、
+// 支払いごとに違う人へ散らばる。立て替えた人は最後に回す（払った人が損しないように）。
+export function splitShares(total, payerId, memberIds, seed = '') {
   const result = new Map();
   const n = memberIds.length;
   if (n === 0) return result;
   const base = Math.floor(total / n);
   let rest = total - base * n;
+  const lottery = (id) => hash(`${seed}:${id}`);
   const order = [
-    ...memberIds.filter((id) => id !== payerId),
+    ...memberIds.filter((id) => id !== payerId).sort((a, b) => lottery(a) - lottery(b) || (a < b ? -1 : 1)),
     ...memberIds.filter((id) => id === payerId),
   ];
   for (const id of order) {
@@ -22,13 +35,13 @@ export function splitShares(total, payerId, memberIds) {
 
 // 1つの支払いを配分する。
 // fixed：個別に入力した金額（メンバーID → 円）。合計から個別分を引いた残りを、割る人全員で均等に割る。
-export function splitExpense(total, payerId, memberIds, fixed = new Map()) {
+export function splitExpense(total, payerId, memberIds, fixed = new Map(), seed = '') {
   const result = new Map();
   if (memberIds.length === 0) return result;
   let fixedSum = 0;
   for (const id of memberIds) fixedSum += Math.max(0, Math.round(Number(fixed.get(id)) || 0));
   const remainder = Math.max(0, total - fixedSum);
-  const even = splitShares(remainder, payerId, memberIds);
+  const even = splitShares(remainder, payerId, memberIds, seed);
   for (const id of memberIds) {
     result.set(id, Math.max(0, Math.round(Number(fixed.get(id)) || 0)) + (even.get(id) || 0));
   }
@@ -55,7 +68,7 @@ export function computeBreakdown(memberIds, expenses, sharesByExpense, payments,
     const total = Math.round(Number(e.jpy_amount));
     const settled = settledByExpense.get(e.id) || new Set();
     get(e.payer_id).paid += total;
-    for (const [id, v] of splitExpense(total, e.payer_id, ids, fixedByExpense.get(e.id))) {
+    for (const [id, v] of splitExpense(total, e.payer_id, ids, fixedByExpense.get(e.id), e.id)) {
       get(id).owed += v;
       if (settled.has(id) && id !== e.payer_id) {
         get(id).spotGave += v;
