@@ -331,3 +331,4 @@ details.more > summary { color: var(--accent); font-weight: 600; margin-bottom: 
 .diff b { color: #c2410c; }
 .d-label { display: inline-block; min-width: 4.5em; color: var(--sub); font-size: 0.8rem; }
 main > .seg { margin-bottom: 4px; }
+.act.cfm { background: #dbeafe; color: #1d4ed8; }

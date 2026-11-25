@@ -1398,6 +1398,13 @@ function describeLog(l) {
     }
     case 'notes':
       return `メモを${A}：${String(r.body ?? '').slice(0, 30)}`;
+    case 'groups':
+      if (l.action === 'CONFIRM') return '精算を確定した';
+      if (l.action === 'UNCONFIRM') return '精算の確定を取り消した';
+      if (l.action === 'SETTLE_MODE') {
+        return r.settle_mode === 'hub' ? `精算方法を「幹事にまとめる」（幹事：${nameOf(r.hub_member_id)}）にした` : '精算方法を「自動」にした';
+      }
+      return '精算の設定を変更';
     case 'checklist_items':
       if (l.action === 'UPDATE') return `「${r.text}」の${r.done ? 'チェックを付けた' : 'チェックを外した'}`;
       return `チェック項目を${A}：${r.text}`;
@@ -1420,7 +1427,10 @@ function viewLog() {
   const filter = state.logFilter || 'all';
   const logs = filter === 'changes' ? all.filter((l) => l.action !== 'INSERT') : all;
   const count = state.logCount || LOG_PAGE;
-  const LABEL = { INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'] };
+  const LABEL = {
+    INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'],
+    CONFIRM: ['確定', 'cfm'], UNCONFIRM: ['取消', 'upd'], SETTLE_MODE: ['精算', 'upd'],
+  };
 
   const row = (l) => {
     const [label, cls] = LABEL[l.action] || [l.action, ''];
@@ -1595,12 +1605,15 @@ app.addEventListener('click', (ev) => {
         });
       }
       break;
-    case 'delete-item':
+    case 'delete-item': {
+      const it = state.data.items.find((x) => x.id === id);
+      if (!confirm(`「${it?.text ?? ''}」を削除しますか？`)) break;
       run(async () => {
         await check(state.db.from('checklist_items').delete().eq('id', id));
         await refresh();
       });
       break;
+    }
     case 'delete-note':
       if (confirm('このメモを削除しますか？')) {
         run(async () => {
