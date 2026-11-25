@@ -89,7 +89,14 @@ async function run(fn) {
     await fn();
   } catch (err) {
     console.error(err);
-    toast(err?.message ? `エラー：${err.message}` : 'エラーが発生しました');
+    if (/duplicate|unique|foreign key/i.test(err?.message || '')) {
+      // ほかの人と同時に同じものを操作した
+      toast('ほかの人と同時に操作したため、最新の状態に更新しました。もう一度確認してください');
+      state.view = null;
+      try { await refresh(); } catch { /* 無視 */ }
+    } else {
+      toast(err?.message ? `エラー：${err.message}` : 'エラーが発生しました');
+    }
   } finally {
     state.busy = false;
   }
@@ -175,6 +182,15 @@ function shareAmounts(e) {
   return splitExpense(Math.round(Number(e.jpy_amount)), e.payer_id, sharesOf(e.id), fixedOf(e) || undefined);
 }
 
+// 編集を始めた時点の支払いの中身（同時編集に気づくため）
+function expenseSnapshot(id) {
+  const e = state.data.allExpenses.find((x) => x.id === id);
+  if (!e) return null;
+  const shares = state.data.shares.filter((s) => s.expense_id === id)
+    .map((s) => `${s.member_id}:${s.settled ? 1 : 0}:${s.fixed_amount ?? ''}`).sort().join(',');
+  return { row: { ...e }, shares };
+}
+
 // 自分の買い物（立て替えた本人だけの支払い）。精算には影響せず、家計簿としてだけ数える
 function isPersonal(e) {
   const ids = sharesOf(e.id);
@@ -204,7 +220,30 @@ async function load() {
     check(db.from('checklist_items').select('*').eq('group_id', g).order('created_at')),
     check(db.from('logs').select('*').eq('group_id', g).order('created_at', { ascending: false }).limit(100)),
   ]);
-  state.data = { group, members, expenses, shares, payments, notes, items, logs };
+  // 他の人の「自分の買い物」は、一覧・合計・ログから外す（本人の画面にだけ出す）
+  const personalOf = (e) => {
+    const ids = shares.filter((s) => s.expense_id === e.id);
+    return ids.length === 1 && ids[0].member_id === e.payer_id;
+  };
+  const hidden = new Set(expenses.filter((e) => personalOf(e) && e.payer_id !== state.me).map((e) => e.id));
+  for (const l of logs) {
+    const r = l.detail || {};
+    if (l.table_name === 'expenses' && l.action === 'DELETE' && r.payer_id !== state.me
+      && Array.isArray(r.shares) && r.shares.length === 1 && r.shares[0].member_id === r.payer_id) {
+      hidden.add(r.id);
+    }
+  }
+  state.data = {
+    group,
+    members,
+    allExpenses: expenses,
+    expenses: expenses.filter((e) => !hidden.has(e.id)),
+    shares,
+    payments,
+    notes,
+    items,
+    logs: logs.filter((l) => !(l.table_name === 'expenses' && hidden.has(l.detail?.id))),
+  };
 }
 
 async function refresh() {
@@ -325,7 +364,7 @@ function setMe(id) {
   state.me = id;
   lsSet(`me:${state.gid}`, id);
   state.db = makeClient(state.gid, id);
-  render();
+  run(refresh);
 }
 
 async function joinGroup(form) {
@@ -718,6 +757,28 @@ async function saveExpense(f) {
     category: f.category.value || null,
   };
 
+  // 時間差で他の人が入力・削除していることがあるので、保存の直前に最新を読み直す
+  await load();
+  if (state.view.id && !state.data.allExpenses.some((x) => x.id === state.view.id)) {
+    state.view = null;
+    render();
+    return toast('この支払いは、ほかの人が削除しました');
+  }
+  // 編集中にほかの人が同じ支払いを変えていたら、上書きしてよいか確かめる
+  if (state.view.id && state.view.snapshot) {
+    const before = state.view.snapshot;
+    const latest = expenseSnapshot(state.view.id);
+    const keys = ['title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'payer_id', 'paid_at', 'paid_time', 'category'];
+    const rowChanged = keys.some((k) => String(before.row[k] ?? '') !== String(latest.row[k] ?? ''));
+    if (rowChanged || before.shares !== latest.shares) {
+      const what = rowChanged ? expenseDiff(before.row, latest.row) : '割る人などを変更';
+      if (!confirm(`あなたが編集している間に、ほかの人がこの支払いを変更しました。\n（${what}）\n\nあなたの内容で上書きしますか？\n「キャンセル」を押すと、最新の内容を表示します。`)) {
+        state.view = { type: 'expense', id: state.view.id, snapshot: latest };
+        render();
+        return;
+      }
+    }
+  }
   const orig = state.view.id ? state.data.expenses.find((x) => x.id === state.view.id) : null;
   const unchanged = orig && orig.paid_at === row.paid_at && Math.round(Number(orig.jpy_amount)) === jpy;
   if (!unchanged && !okToSaveDespiteDuplicates(row.paid_at, jpy, state.view.id)) return;
@@ -825,6 +886,13 @@ async function markPaid(i) {
   const t = currentPlan().plan[i];
   if (!t) return;
   if (!confirm(`${nameOf(t.from)} → ${nameOf(t.to)} ${yen(t.amount)} を送金済みにしますか？`)) return;
+  // 同じ送金をほかの人が先に記録していないか、最新の状態で確かめる
+  await load();
+  const still = currentPlan().plan.some((x) => x.from === t.from && x.to === t.to && x.amount === t.amount);
+  if (!still) {
+    render();
+    return toast('ほかの人が先に記録したか、支払いが変わったため、送金リストを更新しました');
+  }
   await check(state.db.from('payments').insert({
     group_id: state.gid, from_member_id: t.from, to_member_id: t.to, amount: t.amount,
   }));
@@ -925,7 +993,7 @@ function viewPerson() {
 // 支払いや送金に関わっている人は、消すとデータが壊れるので削除できない
 function memberInUse(id) {
   const d = state.data;
-  return d.expenses.some((e) => e.payer_id === id)
+  return d.allExpenses.some((e) => e.payer_id === id)
     || d.shares.some((s) => s.member_id === id)
     || d.payments.some((p) => p.from_member_id === id || p.to_member_id === id);
 }
@@ -1013,7 +1081,7 @@ async function restoreFromLog(logId) {
   if (!l || l.action !== 'DELETE') return;
   const r = l.detail || {};
   if (l.table_name === 'expenses') {
-    if (d.expenses.some((e) => e.id === r.id)) return toast('すでに元に戻っています');
+    if (d.allExpenses.some((e) => e.id === r.id)) return toast('すでに元に戻っています');
     if (!d.members.some((m) => m.id === r.payer_id)) return toast('立て替えた人がもういないため戻せません');
     if (!confirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`)) return;
     const row = {};
@@ -1130,7 +1198,7 @@ function describeLog(l) {
 function canRestore(l) {
   if (l.action !== 'DELETE') return false;
   const id = l.detail?.id;
-  if (l.table_name === 'expenses') return !state.data.expenses.some((e) => e.id === id);
+  if (l.table_name === 'expenses') return !state.data.allExpenses.some((e) => e.id === id);
   if (l.table_name === 'payments') return !state.data.payments.some((p) => p.id === id);
   return false;
 }
@@ -1200,7 +1268,7 @@ app.addEventListener('click', (ev) => {
     case 'close-share': document.getElementById('share-sheet')?.remove(); break;
     case 'new-expense': state.view = { type: 'expense', id: null }; render(); break;
     case 'new-personal': state.view = { type: 'expense', id: null, personal: true }; render(); break;
-    case 'edit-expense': state.view = { type: 'expense', id }; render(); break;
+    case 'edit-expense': state.view = { type: 'expense', id, snapshot: expenseSnapshot(id) }; render(); break;
     case 'close': state.view = null; render(); break;
     case 'fetch-rate': run(fillRate); break;
     case 'delete-expense':
@@ -1359,7 +1427,7 @@ app.addEventListener('input', (ev) => {
 
 /* ---------- 自動で最新にする ---------- */
 
-// 入力途中の文字を消さないように、何か書きかけのときは更新しない
+// 10秒ごとに最新を読み込む。入力途中の文字を消さないように、何か書きかけのときは更新しない
 function hasDraft() {
   if (state.view || document.getElementById('share-sheet')) return true;
   return [...app.querySelectorAll('input[type="text"], input:not([type]), textarea')]
@@ -1371,7 +1439,7 @@ function autoRefresh() {
   load().then(render).catch(() => { /* 次回また試す */ });
 }
 
-setInterval(autoRefresh, 20000);
+setInterval(autoRefresh, 10000);
 document.addEventListener('visibilitychange', autoRefresh);
 window.addEventListener('hashchange', route);
 route();
