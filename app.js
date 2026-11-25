@@ -266,6 +266,8 @@ function route() {
 }
 
 async function openGroup(gid) {
+  formMemory.forms = {};
+  formMemory.open = new Set();
   state.gid = gid;
   state.me = lsGet(`me:${gid}`);
   state.db = makeClient(gid, state.me);
@@ -284,6 +286,7 @@ async function openGroup(gid) {
     state.me = null;
     state.db = makeClient(gid, null);
   }
+  if (state.me) restoreDraft();
   render();
 }
 
@@ -381,6 +384,8 @@ async function joinGroup(form) {
 
 function renderGroup() {
   const d = state.data;
+  if (app.querySelector('.tabs')) rememberForms();
+  if (state.view?.type !== 'expense' || state.skipKeep) delete formMemory.forms['expense-form'];
   const tabs = [['expenses', '支払い'], ['settle', '精算'], ['memo', 'メモ'], ['log', 'ログ']];
   const views = { expenses: viewExpenses, settle: viewSettle, memo: viewMemo, log: viewLog };
   app.innerHTML = `
@@ -399,7 +404,115 @@ function renderGroup() {
     </nav>
     <main>${views[state.tab]()}</main>
     ${viewSheet()}`;
+  // 画面を描き直しても（タブを切り替えても）、入力途中の値と開いていた折りたたみを残す
+  if (state.pendingDraft) {
+    Object.assign(formMemory.forms, state.pendingDraft.forms || {});
+    formMemory.open = new Set(state.pendingDraft.open || []);
+    if (state.pendingDraft.notify) toast('入力途中の内容を復元しました');
+    state.pendingDraft = null;
+  }
+  applyFormState(formMemory);
+  state.skipKeep = false;
   if (state.view?.type === 'expense') updatePreview();
+  saveDraft();
+}
+
+/* ---------- 入力途中の内容を守る ---------- */
+
+const DRAFT_FORMS = ['expense-form', 'loan-form', 'manual-pay-form', 'item-form', 'note-form'];
+const DRAFT_MAX_AGE = 6 * 60 * 60 * 1000; // 6時間より前の下書きは使わない
+
+// 今の画面の入力値と、開いている折りたたみを取り出す
+function captureFormState() {
+  const forms = {};
+  for (const id of DRAFT_FORMS) {
+    const f = document.getElementById(id);
+    if (!f) continue;
+    const vals = {};
+    for (const el of f.elements) {
+      if (!el.name) continue;
+      if (el.type === 'checkbox' || el.type === 'radio') vals[`${el.name}=${el.value}`] = el.checked;
+      else vals[el.name] = el.value;
+    }
+    if (id === 'expense-form') vals.__more = !!f.querySelector('details.more')?.open;
+    forms[id] = vals;
+  }
+  // 支払いの入力画面の中の折りたたみは、フォームの値と一緒に扱う
+  const details = [...app.querySelectorAll('details > summary')]
+    .filter((x) => !x.closest('#expense-form'))
+    .map((x) => [x.textContent.trim(), x.parentElement.open]);
+  return { forms, details };
+}
+
+// 画面に出ているフォームの値を覚えておく（出ていないタブの分は前の値のまま）
+const formMemory = { forms: {}, open: new Set() };
+function rememberForms() {
+  const st = captureFormState();
+  Object.assign(formMemory.forms, st.forms);
+  for (const [key, isOpen] of st.details) {
+    if (isOpen) formMemory.open.add(key);
+    else formMemory.open.delete(key);
+  }
+}
+
+function applyFormState(st) {
+  for (const [id, vals] of Object.entries(st.forms || {})) {
+    const f = document.getElementById(id);
+    if (!f) continue;
+    for (const el of f.elements) {
+      if (!el.name) continue;
+      if (el.type === 'checkbox' || el.type === 'radio') {
+        const k = `${el.name}=${el.value}`;
+        if (k in vals) el.checked = vals[k];
+      } else if (el.name in vals) {
+        el.value = vals[el.name];
+      }
+    }
+    if (vals.__more) f.querySelector('details.more')?.setAttribute('open', '');
+  }
+  const open = new Set(st.open || []);
+  for (const sm of app.querySelectorAll('details > summary')) {
+    if (open.has(sm.textContent.trim())) sm.parentElement.open = true;
+  }
+}
+
+// スマホがページを閉じても戻せるよう、端末に下書きとして残す
+function saveDraft() {
+  if (!state.gid || !state.me || !state.data?.group || !app.querySelector('.tabs')) return;
+  rememberForms();
+  const view = state.view?.type === 'expense' ? { id: state.view.id, personal: !!state.view.personal } : null;
+  const forms = { ...formMemory.forms };
+  if (!view) delete forms['expense-form'];
+  lsSet(`draft:${state.gid}`, JSON.stringify({
+    at: Date.now(), me: state.me, tab: state.tab, view, forms, open: [...formMemory.open],
+  }));
+}
+
+let draftTimer;
+function saveDraftSoon() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 300);
+}
+
+// グループを開いたときに、使える下書きがあれば戻す準備をする
+function restoreDraft() {
+  let d;
+  try { d = JSON.parse(lsGet(`draft:${state.gid}`) || 'null'); } catch { d = null; }
+  if (!d || d.me !== state.me || Date.now() - d.at > DRAFT_MAX_AGE) return;
+  if (d.tab) state.tab = d.tab;
+  let typed = false;
+  if (d.view && (!d.view.id || state.data.allExpenses.some((e) => e.id === d.view.id))) {
+    state.view = { type: 'expense', id: d.view.id, personal: d.view.personal };
+    if (d.view.id) state.view.snapshot = expenseSnapshot(d.view.id);
+    typed = true;
+  }
+  // 支払い以外のフォームに、文字や金額が入っていたか
+  const TYPED = ['amount', 'note', 'text', 'body'];
+  for (const [id, vals] of Object.entries(d.forms || {})) {
+    if (id !== 'expense-form' && TYPED.some((k) => (vals[k] ?? '') !== '')) typed = true;
+  }
+  if (!typed && !(d.open || []).length) return;
+  state.pendingDraft = { ...d, notify: typed };
 }
 
 function viewSheet() {
@@ -774,6 +887,7 @@ async function saveExpense(f) {
       const what = rowChanged ? expenseDiff(before.row, latest.row) : '割る人などを変更';
       if (!confirm(`あなたが編集している間に、ほかの人がこの支払いを変更しました。\n（${what}）\n\nあなたの内容で上書きしますか？\n「キャンセル」を押すと、最新の内容を表示します。`)) {
         state.view = { type: 'expense', id: state.view.id, snapshot: latest };
+        state.skipKeep = true;
         render();
         return;
       }
@@ -1446,6 +1560,7 @@ app.addEventListener('submit', (ev) => {
     case 'item-form':
       run(async () => {
         await check(state.db.from('checklist_items').insert({ group_id: state.gid, text: f.text.value.trim() }));
+        f.reset();
         await refresh();
       });
       break;
@@ -1459,6 +1574,7 @@ app.addEventListener('submit', (ev) => {
         await check(state.db.from('payments').insert({
           group_id: state.gid, from_member_id: from, to_member_id: to, amount,
         }));
+        f.reset();
         await refresh();
         toast('記録しました');
       });
@@ -1480,6 +1596,7 @@ app.addEventListener('submit', (ev) => {
           kind: 'loan',
           note: f.note.value.trim() || null,
         }));
+        f.reset();
         await refresh();
         toast('記録しました');
       });
@@ -1487,6 +1604,7 @@ app.addEventListener('submit', (ev) => {
     case 'note-form':
       run(async () => {
         await check(state.db.from('notes').insert({ group_id: state.gid, body: f.body.value.trim() }));
+        f.reset();
         await refresh();
       });
       break;
@@ -1514,6 +1632,14 @@ app.addEventListener('change', (ev) => {
   }
 });
 
+['input', 'change'].forEach((type) => app.addEventListener(type, (ev) => {
+  if (ev.target.closest('form')) saveDraftSoon();
+}));
+
+// ページを離れる直前にも下書きを残す
+window.addEventListener('pagehide', saveDraft);
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveDraft(); });
+
 app.addEventListener('input', (ev) => {
   if (ev.target.closest('#expense-form')) updatePreview();
 });
@@ -1523,8 +1649,11 @@ app.addEventListener('input', (ev) => {
 // 10秒ごとに最新を読み込む。入力途中の文字を消さないように、何か書きかけのときは更新しない
 function hasDraft() {
   if (state.view || document.getElementById('share-sheet')) return true;
-  return [...app.querySelectorAll('input[type="text"], input:not([type]), textarea')]
-    .some((el) => el.value.trim() !== '' && !el.readOnly);
+  // 入力欄にカーソルがある間は更新しない（描き直すとカーソルが外れるため）。
+  // それ以外は描き直しても入力値は残るので、更新してよい
+  const a = document.activeElement;
+  if (a && app.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) return true;
+  return false;
 }
 
 function autoRefresh() {
