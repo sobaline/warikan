@@ -51,6 +51,7 @@ create table public.expense_shares (
   expense_id uuid not null references public.expenses(id) on delete cascade,
   member_id uuid not null references public.members(id) on delete cascade,
   group_id uuid not null references public.groups(id) on delete cascade,
+  settled boolean not null default false,               -- その場で払い済みか
   primary key (expense_id, member_id)
 );
 
@@ -61,6 +62,8 @@ create table public.payments (
   from_member_id uuid not null references public.members(id) on delete cascade,
   to_member_id uuid not null references public.members(id) on delete cascade,
   amount numeric(14, 0) not null check (amount > 0),
+  kind text not null default 'payment' check (kind in ('payment', 'loan')), -- 送金 or 貸し借り
+  note text,
   created_at timestamptz not null default now()
 );
 

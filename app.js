@@ -95,6 +95,27 @@ function shareMap() {
   return map;
 }
 
+// その場で払い済みの人（立て替えた本人は除く）
+function settledOf(e) {
+  return state.data.shares
+    .filter((s) => s.expense_id === e.id && s.settled && s.member_id !== e.payer_id)
+    .map((s) => s.member_id);
+}
+
+function settledMap() {
+  const map = new Map();
+  for (const e of state.data.expenses) map.set(e.id, new Set(settledOf(e)));
+  return map;
+}
+
+// 支払いの精算状況：'all'＝全員その場で精算済み、'some'＝一部、null＝なし
+function settledStatus(e) {
+  const others = sharesOf(e.id).filter((id) => id !== e.payer_id);
+  const done = settledOf(e).length;
+  if (!others.length || !done) return null;
+  return done >= others.length ? 'all' : 'some';
+}
+
 /* ---------- データの読み込み ---------- */
 
 async function load() {
@@ -265,13 +286,16 @@ function viewExpenses() {
   const total = d.expenses.reduce((s, e) => s + Number(e.jpy_amount), 0);
   const items = d.expenses.map((e) => {
     const n = sharesOf(e.id).length;
+    const st = settledStatus(e);
+    const stBadge = st === 'all' ? ' <span class="badge ok">精算済み</span>'
+      : st === 'some' ? ' <span class="badge ok">一部精算済み</span>' : '';
     const foreign = e.currency !== 'JPY'
       ? `<div class="sub">${Number(e.amount).toLocaleString('ja-JP')} ${esc(e.currency)}${e.jpy_confirmed ? '' : ' <span class="badge">仮</span>'}</div>`
       : '';
     return `
       <li class="item" data-act="edit-expense" data-id="${e.id}">
         <div class="main">
-          <div class="title">${esc(e.title)}</div>
+          <div class="title">${esc(e.title)}${stBadge}</div>
           <div class="sub">${esc(nameOf(e.payer_id))}が立て替え・${n}人で割り勘・${esc(e.paid_at.slice(5).replace('-', '/'))}</div>
         </div>
         <div class="amt">${yen(e.jpy_amount)}${foreign}</div>
@@ -281,7 +305,40 @@ function viewExpenses() {
     <div class="summary">合計 <b>${yen(total)}</b>（${d.expenses.length}件）</div>
     <button class="btn primary wide" data-act="new-expense">＋ 支払いを追加</button>
     ${d.expenses.length ? `<ul class="list">${items}</ul>` : '<p class="empty">まだ支払いがありません</p>'}
-    ${d.expenses.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}`;
+    ${d.expenses.some((e) => !e.jpy_confirmed) ? '<p class="hint"><span class="badge">仮</span> は自動レートで計算した金額です。カード明細の金額がわかったら、支払いを開いて書き換えてください。</p>' : ''}
+    ${viewLoans()}`;
+}
+
+/* 貸し借り（payments の kind='loan' として記録する。貸した人→借りた人へお金が動いた扱い） */
+
+function viewLoans() {
+  const d = state.data;
+  const loans = d.payments.filter((p) => p.kind === 'loan');
+  const rows = loans.map((p) => `
+    <li class="item">
+      <div class="main">
+        <b>${esc(nameOf(p.to_member_id))}</b> が <b>${esc(nameOf(p.from_member_id))}</b> から借りた
+        <div class="sub">${p.note ? `${esc(p.note)}・` : ''}${fmtTime(p.created_at)}</div>
+      </div>
+      <div class="amt">${yen(p.amount)}</div>
+      <button class="x" data-act="delete-loan" data-id="${p.id}" aria-label="削除">×</button>
+    </li>`).join('');
+  return `
+    <h3>貸し借り</h3>
+    <details class="card manual">
+      <summary>＋ お金を借りた・貸した記録を追加</summary>
+      <p class="hint">「現金が足りなくてAさんに5,000円借りた」などを記録すると、最後の精算にまとめて反映されます。</p>
+      <form id="loan-form">
+        <div class="row">
+          <label class="grow">借りた人<select name="borrower">${d.members.map((m) => `<option value="${m.id}" ${m.id === state.me ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+          <label class="grow">貸した人<select name="lender">${d.members.map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></label>
+        </div>
+        <label>金額（円）<input name="amount" type="number" inputmode="numeric" min="1" step="1" required></label>
+        <label>メモ（任意）<input name="note" maxlength="60" placeholder="例：タクシー代"></label>
+        <button class="btn primary wide">記録する</button>
+      </form>
+    </details>
+    ${loans.length ? `<ul class="list">${rows}</ul>` : ''}`;
 }
 
 function viewExpenseForm() {
@@ -290,6 +347,7 @@ function viewExpenseForm() {
   const cur = e?.currency ?? 'JPY';
   const shareIds = e ? sharesOf(e.id) : d.members.map((m) => m.id);
   const actual = e && e.currency !== 'JPY' && e.jpy_confirmed ? Number(e.jpy_amount) : '';
+  const settledIds = e ? settledOf(e) : [];
   return `
     <div class="sheet">
       <form id="expense-form" class="card">
@@ -318,6 +376,14 @@ function viewExpenseForm() {
         <div class="checks">
           ${d.members.map((m) => `<label class="check"><input type="checkbox" name="share" value="${m.id}" ${shareIds.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('')}
         </div>
+        <details class="settled-box" ${settledIds.length ? 'open' : ''}>
+          <summary>その場で精算した人がいる</summary>
+          <p class="hint">立て替えた人にその場で自分の分を払った人にチェックを入れると、その人の分は最後の精算から外れます。</p>
+          <label class="check"><input type="checkbox" id="settle-all">この会計は全員その場で精算済み</label>
+          <div class="checks">
+            ${d.members.map((m) => `<label class="check"><input type="checkbox" name="settled" value="${m.id}" ${settledIds.includes(m.id) ? 'checked' : ''}>${esc(m.name)}</label>`).join('')}
+          </div>
+        </details>
         <label>日付<input name="paid_at" type="date" value="${esc(e?.paid_at ?? today())}"></label>
         <div class="actions">
           ${e ? '<button type="button" class="btn danger" data-act="delete-expense">削除</button>' : ''}
@@ -411,9 +477,13 @@ async function saveExpense(f) {
   } else {
     id = (await check(db.from('expenses').insert(row).select('id').single())).id;
   }
-  await check(db.from('expense_shares').insert(
-    shares.map((m) => ({ expense_id: id, member_id: m, group_id: state.gid })),
-  ));
+  const settled = [...f.querySelectorAll('input[name="settled"]:checked')].map((i) => i.value);
+  await check(db.from('expense_shares').insert(shares.map((m) => ({
+    expense_id: id,
+    member_id: m,
+    group_id: state.gid,
+    settled: settled.includes(m) && m !== row.payer_id,
+  }))));
   state.view = null;
   await refresh();
   toast('保存しました');
@@ -424,7 +494,7 @@ async function saveExpense(f) {
 function currentPlan() {
   const d = state.data;
   const ids = d.members.map((m) => m.id);
-  const bal = computeBalances(ids, d.expenses, shareMap(), d.payments);
+  const bal = computeBalances(ids, d.expenses, shareMap(), d.payments, settledMap());
   const hub = ids.includes(d.group.hub_member_id) ? d.group.hub_member_id : null;
   const mode = d.group.settle_mode === 'hub' && hub ? 'hub' : 'auto';
   const plan = mode === 'hub' ? settleHub(bal, hub) : settleAuto(bal);
@@ -449,7 +519,8 @@ function viewSettle() {
     return `<li class="item"><div class="main">${esc(m.name)}</div><div class="amt">${label}</div></li>`;
   }).join('');
 
-  const history = d.payments.map((p) => `
+  const paid = d.payments.filter((p) => p.kind !== 'loan');
+  const history = paid.map((p) => `
     <li class="item">
       <div class="main">${esc(nameOf(p.from_member_id))} → ${esc(nameOf(p.to_member_id))}<div class="sub">${fmtTime(p.created_at)}</div></div>
       <div class="amt">${yen(p.amount)}</div>
@@ -468,7 +539,19 @@ function viewSettle() {
     ${plan.length ? `<ul class="list">${rows}</ul>` : '<p class="empty">精算はすべて完了しています</p>'}
     <h3>一人ひとりの差し引き</h3>
     <ul class="list">${balRows}</ul>
-    ${d.payments.length ? `<h3>送金済み</h3><ul class="list">${history}</ul>` : ''}`;
+    <details class="card manual">
+      <summary>リスト以外で送金した分を記録する</summary>
+      <p class="hint">「Bさんだけ先にAさんへ払った」など、リストと違う形で払った分を記録すると、残りの精算が計算し直されます。</p>
+      <form id="manual-pay-form">
+        <div class="row">
+          <label class="grow">払った人<select name="from">${d.members.map((m) => `<option value="${m.id}" ${m.id === state.me ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+          <label class="grow">受け取った人<select name="to">${d.members.map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select></label>
+        </div>
+        <label>金額（円）<input name="amount" type="number" inputmode="numeric" min="1" step="1" required></label>
+        <button class="btn primary wide">記録する</button>
+      </form>
+    </details>
+    ${paid.length ? `<h3>送金済み</h3><ul class="list">${history}</ul>` : ''}`;
 }
 
 async function setMode(mode) {
@@ -533,6 +616,10 @@ function describeLog(l) {
     case 'expenses':
       return `支払いを${A}：${r.title}（${yen(r.jpy_amount)}）`;
     case 'payments': {
+      if (r.kind === 'loan') {
+        const loan = `${nameOf(r.to_member_id)}が${nameOf(r.from_member_id)}から${yen(r.amount)}借りた${r.note ? `（${r.note}）` : ''}`;
+        return l.action === 'DELETE' ? `貸し借りを削除：${loan}` : `貸し借りを${A}：${loan}`;
+      }
       const what = `${nameOf(r.from_member_id)} → ${nameOf(r.to_member_id)} ${yen(r.amount)}`;
       if (l.action === 'INSERT') return `送金済みにした：${what}`;
       if (l.action === 'DELETE') return `送金済みを取り消した：${what}`;
@@ -636,6 +723,14 @@ app.addEventListener('click', (ev) => {
         await refresh();
       });
       break;
+    case 'delete-loan':
+      if (confirm('この貸し借りの記録を削除しますか？')) {
+        run(async () => {
+          await check(state.db.from('payments').delete().eq('id', id));
+          await refresh();
+        });
+      }
+      break;
     case 'delete-item':
       run(async () => {
         await check(state.db.from('checklist_items').delete().eq('id', id));
@@ -668,6 +763,40 @@ app.addEventListener('submit', (ev) => {
         await refresh();
       });
       break;
+    case 'manual-pay-form':
+      run(async () => {
+        const from = f.from.value;
+        const to = f.to.value;
+        const amount = Math.round(Number(f.amount.value));
+        if (from === to) return toast('払った人と受け取った人が同じです');
+        if (!(amount > 0)) return toast('金額を入れてください');
+        await check(state.db.from('payments').insert({
+          group_id: state.gid, from_member_id: from, to_member_id: to, amount,
+        }));
+        await refresh();
+        toast('記録しました');
+      });
+      break;
+    case 'loan-form':
+      run(async () => {
+        const borrower = f.borrower.value;
+        const lender = f.lender.value;
+        const amount = Math.round(Number(f.amount.value));
+        if (borrower === lender) return toast('借りた人と貸した人が同じです');
+        if (!(amount > 0)) return toast('金額を入れてください');
+        // 貸した人 → 借りた人 へお金が動いたので、貸した人が受け取る側になる
+        await check(state.db.from('payments').insert({
+          group_id: state.gid,
+          from_member_id: lender,
+          to_member_id: borrower,
+          amount,
+          kind: 'loan',
+          note: f.note.value.trim() || null,
+        }));
+        await refresh();
+        toast('記録しました');
+      });
+      break;
     case 'note-form':
       run(async () => {
         await check(state.db.from('notes').insert({ group_id: state.gid, body: f.body.value.trim() }));
@@ -684,6 +813,13 @@ app.addEventListener('change', (ev) => {
   if (t.name === 'currency') {
     updatePreview();
     if (t.value !== 'JPY') run(fillRate);
+  }
+  if (t.id === 'settle-all') {
+    const f = t.closest('form');
+    const shares = [...f.querySelectorAll('input[name="share"]:checked')].map((i) => i.value);
+    f.querySelectorAll('input[name="settled"]').forEach((i) => {
+      i.checked = t.checked && shares.includes(i.value) && i.value !== f.payer.value;
+    });
   }
   if (t.id === 'hub-select') {
     run(async () => {

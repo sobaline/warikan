@@ -225,3 +225,10 @@ details summary { color: var(--sub); font-size: 0.9rem; cursor: pointer; margin-
   z-index: 30;
   max-width: 90vw;
 }
+
+.badge.ok { background: var(--accent-soft); color: var(--accent); }
+.settled-box { margin-bottom: 14px; }
+.settled-box .check { margin-bottom: 8px; }
+.manual { margin-top: 16px; padding: 14px; }
+.manual summary { margin: 0; }
+.manual form { margin-top: 12px; }

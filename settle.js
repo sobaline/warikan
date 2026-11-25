@@ -21,15 +21,24 @@ export function splitShares(total, payerId, memberIds) {
 }
 
 // 各メンバーの差し引き。プラス＝受け取る、マイナス＝払う。
-export function computeBalances(memberIds, expenses, sharesByExpense, payments) {
+// settledByExpense：支払いごとに「その場で払い済みの人」の集合。その人の分は精算から外す。
+export function computeBalances(memberIds, expenses, sharesByExpense, payments, settledByExpense = new Map()) {
   const bal = new Map(memberIds.map((id) => [id, 0]));
   const add = (id, v) => bal.set(id, (bal.get(id) || 0) + v);
   for (const e of expenses) {
     const ids = sharesByExpense.get(e.id) || [];
     if (ids.length === 0) continue;
     const total = Math.round(Number(e.jpy_amount));
+    const settled = settledByExpense.get(e.id) || new Set();
     add(e.payer_id, total);
-    for (const [id, v] of splitShares(total, e.payer_id, ids)) add(id, -v);
+    for (const [id, v] of splitShares(total, e.payer_id, ids)) {
+      add(id, -v);
+      if (settled.has(id) && id !== e.payer_id) {
+        // その場で立て替えた人に払った分を打ち消す
+        add(id, v);
+        add(e.payer_id, -v);
+      }
+    }
   }
   for (const p of payments) {
     add(p.from_member_id, Number(p.amount));
