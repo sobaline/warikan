@@ -123,6 +123,30 @@ async function mutate(query) {
   return data;
 }
 
+// 入力画面などを開いている間は、後ろの画面を固定する（閉じたら元の位置に戻す）
+let lockedY = null;
+function syncScrollLock() {
+  const open = !!document.querySelector('.sheet, .confirm-overlay');
+  const b = document.body;
+  if (open && lockedY === null) {
+    lockedY = window.scrollY;
+    b.style.position = 'fixed';
+    b.style.top = `-${lockedY}px`;
+    b.style.left = '0';
+    b.style.right = '0';
+  } else if (!open && lockedY !== null) {
+    const y = lockedY;
+    lockedY = null;
+    b.style.position = '';
+    b.style.top = '';
+    b.style.left = '';
+    b.style.right = '';
+    window.scrollTo(0, y);
+  }
+}
+// 画面の中身が入れ替わるたびに確かめる
+new MutationObserver(syncScrollLock).observe(document.body, { childList: true, subtree: true });
+
 async function check(promise) {
   const { data, error } = await promise;
   if (error) throw error;
@@ -1520,6 +1544,21 @@ function viewMine() {
       </details>`;
   }).join('');
 
+  // 日ごとにも、最初は金額だけを見せて閉じておく
+  const maxDay = Math.max(...byDay.values(), 1);
+  const dayGroups = [...days].reverse().map((d) => {
+    const its = items.filter((x) => x.e.paid_at === d);
+    return `
+      <details class="genre" data-key="day:${esc(d)}">
+        <summary>
+          <span class="g-name">${dayLabel(d)}<span class="sub">（${its.length}件）</span></span>
+          <span class="bar"><span style="width:${Math.max(2, Math.round((byDay.get(d) / maxDay) * 100))}%"></span></span>
+          <span class="g-val">${yen(byDay.get(d))}</span>
+        </summary>
+        <ul class="list">${its.map(mineRow).join('')}</ul>
+      </details>`;
+  }).join('');
+
   function mineRow({ e, v }) {
     return `
     <li class="item" data-act="edit-expense" data-id="${e.id}">
@@ -1542,7 +1581,8 @@ function viewMine() {
           <h3>種類別</h3>
           <div class="genres">${genres}</div>
           <p class="hint">種類を押すと明細が開きます。種類は、支払いを開いて「詳細」から付けたり変えたりできます。</p>
-          ${days.length > 1 ? `<h3>日別</h3><ul class="bars">${bars(byDay, days, dayLabel)}</ul>` : ''}` : '<p class="empty">まだありません</p>'}
+          <h3>日別</h3>
+          <div class="genres">${dayGroups}</div>` : '<p class="empty">まだありません</p>'}
         <button class="btn ghost wide" data-act="close">閉じる</button>
       </div>
     </div>`;
