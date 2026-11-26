@@ -27,6 +27,7 @@ const fmtTime = (s) => new Date(s).toLocaleString('ja-JP', {
   month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
 });
 const today = () => new Date().toLocaleDateString('sv-SE');
+const minutesText = (m) => (m >= 1440 ? `${Math.round(m / 1440)}日` : m >= 60 ? `${Math.round(m / 60)}時間` : `${m}分`);
 
 const localDate = (ts) => new Date(ts).toLocaleDateString('sv-SE');
 
@@ -516,7 +517,7 @@ async function submitPin(f) {
   } else {
     const res = await check(state.db.rpc('login', { p_member: id, p_pin: pin }));
     if (res.error === 'wrong_pin') { err.textContent = `暗証番号が違います（あと${res.left}回まちがえると10分間ロックされます）`; f.pin.value = ''; return; }
-    if (res.error === 'locked') { err.textContent = `まちがいが続いたため、ロックしています。${res.minutes}分ほど待ってください`; return; }
+    if (res.error === 'locked') { err.textContent = `まちがいが続いたため、ロックしています。${minutesText(res.minutes)}ほど待ってください`; return; }
     if (res.error === 'pin_not_set') { await load(); render(); return; }
     if (res.error) throw new Error(res.error);
     token = res.token;
@@ -566,6 +567,7 @@ function renderGroup() {
         <button class="btn small" data-act="share">共有</button>
       </div>
     </header>
+    ${viewSinceLast()}
     ${lsGet(`guide:${state.gid}`) ? `
       <div class="guide">
         <div><b>グループができました</b><br>次は右上の「共有」から、LINEでメンバーに送りましょう。メンバーは届いたURLを開いて、自分の名前を選びます。</div>
@@ -587,6 +589,49 @@ function renderGroup() {
   state.skipKeep = false;
   if (state.view?.type === 'expense') updatePreview();
   saveDraft();
+}
+
+/* ---------- 前回から変わったこと ---------- */
+// 自分がいない間に、ほかの人が自分に関わるお金の記録を変えていたら知らせる
+
+const seenKey = () => `seen:${state.gid}:${state.me}`;
+
+function isNoticeWorthy(l) {
+  if (l.member_id === state.me) return false; // 自分でしたことは知らせない
+  if (l.action === 'UNCONFIRM') return true;
+  if (l.action === 'PIN_RESET' || l.action === 'PIN_LOCKED') return (l.detail || {}).target === state.me;
+  if (l.table_name !== 'expenses' && l.table_name !== 'payments') return false;
+  return logInvolvesMe(l);
+}
+
+// 「どこまで見たか」は、スマホの時計ではなく、ログ（データベース）の時刻で覚える。
+// スマホの時計がずれていても、お知らせが漏れないようにするため
+const latestLogTime = () => state.data.logs[0]?.created_at || '1970-01-01T00:00:00Z';
+
+function sinceLastChanges() {
+  const seen = lsGet(seenKey());
+  if (!seen) {
+    // 初めて開いたときは、ここを基準にする
+    lsSet(seenKey(), latestLogTime());
+    return [];
+  }
+  return state.data.logs.filter((l) => new Date(l.created_at) > new Date(seen) && isNoticeWorthy(l));
+}
+
+function viewSinceLast() {
+  const ch = sinceLastChanges();
+  if (!ch.length) return '';
+  const show = ch.slice(0, 5);
+  return `
+    <div class="since">
+      <b>前回から、あなたに関わる変更が${ch.length}件あります</b>
+      <ul>${show.map((l) => `<li>${esc(describeLog(l))}<span class="sub">（${esc(l.member_id ? nameOf(l.member_id) : '不明')}・${fmtTime(l.created_at)}）</span></li>`).join('')}</ul>
+      ${ch.length > show.length ? `<p class="sub">ほか${ch.length - show.length}件</p>` : ''}
+      <div class="since-btns">
+        <button class="btn small" data-act="since-log">ログで見る</button>
+        <button class="btn small primary" data-act="since-ok">確認した</button>
+      </div>
+    </div>`;
 }
 
 /* ---------- 入力途中の内容を守る ---------- */
@@ -1759,6 +1804,7 @@ function describeLog(l) {
       if (l.action === 'PIN_SET') return `${r.name} さんが暗証番号を設定した`;
       if (l.action === 'LOGIN') return `${r.name} さんが暗証番号でログインした`;
       if (l.action === 'PIN_RESET') return `${r.name} さんの暗証番号をリセットした`;
+      if (l.action === 'PIN_LOCKED') return `${r.name} さんの暗証番号のまちがいが続いたため、${minutesText(r.minutes)}ロックした`;
       if (l.action === 'UPDATE' && l.old_detail && l.old_detail.name !== r.name) {
         return `メンバーの名前を変更：${l.old_detail.name} → ${r.name}`;
       }
@@ -1845,7 +1891,7 @@ function viewLog() {
   const LABEL = {
     INSERT: ['追加', 'add'], UPDATE: ['変更', 'upd'], DELETE: ['削除', 'del'],
     CONFIRM: ['確定', 'cfm'], UNCONFIRM: ['確定取消', 'unc'], SETTLE_MODE: ['精算方法', 'upd'],
-    PIN_SET: ['暗証番号', 'info'], LOGIN: ['ログイン', 'info'], PIN_RESET: ['リセット', 'del'],
+    PIN_SET: ['暗証番号', 'info'], LOGIN: ['ログイン', 'info'], PIN_RESET: ['リセット', 'del'], PIN_LOCKED: ['ロック', 'del'],
   };
 
   const row = (l) => {
@@ -1972,6 +2018,13 @@ app.addEventListener('click', (ev) => {
       lsDel(`guide:${state.gid}`);
       app.querySelector('.guide')?.remove();
       share();
+      break;
+    case 'since-ok': lsSet(seenKey(), latestLogTime()); render(); break;
+    case 'since-log':
+      lsSet(seenKey(), latestLogTime());
+      state.tab = 'log';
+      state.logFilter = 'mine';
+      render();
       break;
     case 'dismiss-guide': lsDel(`guide:${state.gid}`); render(); break;
     case 'copy-url': copyUrl(); break;
@@ -2215,12 +2268,46 @@ function hasDraft() {
   return false;
 }
 
+// しばらく操作がなければ自動更新を止める（開きっぱなしのスマホがアクセスし続けないように）
+const IDLE_MS = () => window.__idleMs || 5 * 60 * 1000; // 5分
+let lastActivity = Date.now();
+
+function setIdle(on) {
+  state.idle = on;
+  document.getElementById('idle-bar')?.remove();
+  if (on) {
+    const bar = document.createElement('button');
+    bar.id = 'idle-bar';
+    bar.type = 'button';
+    bar.textContent = 'しばらく操作がないため、自動更新を止めています。タップで最新にします';
+    document.body.appendChild(bar);
+  }
+}
+
+function markActive() {
+  lastActivity = Date.now();
+  if (state.idle) {
+    setIdle(false);
+    if (state.gid && state.me && !state.busy && !hasDraft()) load().then(render).catch(() => {});
+  }
+}
+['pointerdown', 'keydown', 'touchstart', 'wheel'].forEach((t) => window.addEventListener(t, markActive, { passive: true }));
+
 function autoRefresh() {
-  if (!state.gid || !state.me || !state.data?.group || document.hidden || state.busy || hasDraft()) return;
+  if (!state.gid || !state.me || !state.data?.group || document.hidden) return;
+  if (Date.now() - lastActivity > IDLE_MS()) {
+    if (!state.idle) setIdle(true);
+    return;
+  }
+  if (state.busy || hasDraft()) return;
   load().then(render).catch(() => { /* 次回また試す */ });
 }
 
 setInterval(autoRefresh, 10000);
-document.addEventListener('visibilitychange', autoRefresh);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) lastActivity = Date.now(); // 画面に戻ってきたら操作したとみなす
+  if (state.idle && !document.hidden) setIdle(false);
+  autoRefresh();
+});
 window.addEventListener('hashchange', route);
 route();
