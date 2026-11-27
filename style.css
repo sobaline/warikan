@@ -485,3 +485,4 @@ main > .seg { margin-bottom: 4px; }
 /* 入力画面の中で端までスクロールしても、後ろの画面に動きを伝えない */
 .sheet, .sheet .card, .confirm-overlay { overscroll-behavior: contain; }
 .sheet { -webkit-overflow-scrolling: touch; }
+.pre-group { margin: 14px 0 0; }

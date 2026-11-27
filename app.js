@@ -625,6 +625,7 @@ function isNoticeWorthy(l) {
   if (l.action === 'UNCONFIRM') return true;
   if (l.action === 'PIN_RESET' || l.action === 'PIN_LOCKED') return (l.detail || {}).target === state.me;
   if (l.table_name !== 'expenses' && l.table_name !== 'payments') return false;
+  if (!isMoneyUpdate(l)) return false; // 種類や名前だけの変更は知らせない
   return logInvolvesMe(l);
 }
 
@@ -811,7 +812,17 @@ function viewExpenses() {
 
   // 新しいものから決まった件数だけ出し、残りは「もっと見る」で出す
   const limit = state.showCount || PAGE_SIZE;
-  const visible = list.slice(0, limit);
+  const pre = sort === 'amount' ? [] : list.filter((e) => e.prepaid);
+  const trip = pre.length ? list.filter((e) => !e.prepaid) : list;
+  const visible = trip.slice(0, limit);
+  const preBox = pre.length ? `
+    <details class="adv-group pre-group" data-key="prepaid">
+      <summary>
+        <span class="main"><b>旅行前の支払い</b><span class="sub">（${pre.length}件）</span></span>
+        <span class="sub">あなた ${yen(pre.reduce((sum, e) => sum + mine(e), 0))}</span>
+      </summary>
+      <ul class="list">${pre.map(expenseRow).join('')}</ul>
+    </details>` : '';
   let body;
   if (sort === 'amount') {
     body = `<ul class="list">${visible.map(expenseRow).join('')}</ul>`;
@@ -827,13 +838,14 @@ function viewExpenses() {
       g.items.push(e);
     }
     body = days.map((g) => {
-      const dayMine = list.filter((e) => e.paid_at === g.date).reduce((sum, e) => sum + mine(e), 0);
+      const dayMine = trip.filter((e) => e.paid_at === g.date).reduce((sum, e) => sum + mine(e), 0);
       return `
         <div class="day"><b>${dayLabel(g.date)}</b><span class="sub">あなた ${yen(dayMine)}</span></div>
         <ul class="list">${g.items.map(expenseRow).join('')}</ul>`;
     }).join('');
   }
-  const rest = list.length - visible.length;
+  body = preBox + body;
+  const rest = trip.length - visible.length;
   const more = rest > 0
     ? `<button class="btn ghost wide more-btn" data-act="show-more">もっと見る（残り${rest}件）</button>`
     : '';
@@ -1002,7 +1014,7 @@ function viewExpenseForm() {
   const actual = e && e.currency !== 'JPY' && e.jpy_confirmed ? Number(e.jpy_amount) : '';
   const settledIds = e ? settledOf(e) : [];
   const fixed = e ? fixedOf(e) : null;
-  const openMore = cur !== 'JPY' || !!fixed || settledIds.length > 0;
+  const openMore = cur !== 'JPY' || !!fixed || settledIds.length > 0 || !!e?.prepaid;
   return `
     <div class="sheet">
       <form id="expense-form" class="card">
@@ -1010,8 +1022,8 @@ function viewExpenseForm() {
         <label>何に<input name="title" required maxlength="60" value="${esc(e?.title ?? '')}" placeholder="${personal ? '例：お土産' : '例：夕食'}"></label>
         <label>金額（<span id="cur-label">${esc(cur)}</span>）
           <div class="row amount-row">
-            <input name="amount" type="text" inputmode="decimal" autocomplete="off" required value="${e ? Number(e.amount) : ''}" placeholder="例：3000　または　1200+800">
-            <button type="button" class="btn small" data-act="amount-plus" aria-label="足し算の＋を入れる">＋</button>
+            <input name="amount" type="text" inputmode="decimal" autocomplete="off" required value="${e ? Number(e.amount) : ''}" placeholder="例：3000　1200+800　5690×4">
+            <button type="button" class="btn small" data-act="amount-plus" aria-label="＋を入れる（もう1回押すと×）">＋</button>
           </div>
           <span class="calc" id="calc-result"></span>
         </label>
@@ -1030,6 +1042,7 @@ function viewExpenseForm() {
             <label class="grow">日付<input name="paid_at" type="date" value="${esc(e?.paid_at ?? today())}"></label>
             <label class="grow">時間<input name="paid_time" type="time" value="${esc(e ? (e.paid_time ?? '').slice(0, 5) : nowTime())}"></label>
           </div>
+          <label class="check"><input type="checkbox" name="prepaid" ${e?.prepaid ? 'checked' : ''}>旅行前に払った支払い（航空券・ホテルなど）</label>
           <label>種類
             <select name="category">
               <option value="">未分類</option>
@@ -1087,19 +1100,21 @@ function evalAmount(str) {
   const t = String(str ?? '')
     .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
     .replace(/[＋]/g, '+').replace(/[－ー−]/g, '-').replace(/[．]/g, '.')
+    .replace(/[×＊*xXｘＸ]/g, '*')
     .replace(/[,，円\s]/g, '');
-  if (!t || !/^[0-9.+-]+$/.test(t) || /[+-]{2}|[+-]$|^\+/.test(t)) return NaN;
-  const nums = t.match(/-?[0-9.]+/g) || [];
-  if (nums.join('') !== t.replace(/\+/g, '')) return NaN;
+  const num = '(?:\\d+(?:\\.\\d*)?|\\.\\d+)';
+  if (!new RegExp(`^-?${num}(?:[+*-]${num})*$`).test(t)) return NaN;
+  // 掛け算を先に計算してから、足し算・引き算をする
   let sum = 0;
-  for (const n of nums) {
-    if ((n.match(/\./g) || []).length > 1) return NaN;
-    sum += Number(n);
+  for (const term of t.match(/^-?[^+-]+|[+-][^+-]+/g)) {
+    const sign = term[0] === '-' ? -1 : 1;
+    const v = term.replace(/^[+-]/, '').split('*').reduce((a, b) => a * Number(b), 1);
+    sum += sign * v;
   }
   return Math.round(sum * 100) / 100;
 }
 
-const hasOperator = (str) => /[+\-＋－ー−]/.test(String(str).replace(/^[-－ー−]/, ''));
+const hasOperator = (str) => /[+\-＋－ー−×＊*xXｘＸ]/.test(String(str).replace(/^[-－ー−]/, ''));
 
 // 入力画面の今の値から、精算に使う円の金額を出す
 function formJpy(f) {
@@ -1256,6 +1271,7 @@ async function saveExpense(f) {
     paid_at: f.paid_at.value || today(),
     paid_time: f.paid_time.value || null,
     category: f.category.value || null,
+    prepaid: f.prepaid.checked,
   };
 
   // 時間差で他の人が入力・削除していることがあるので、保存の直前に最新を読み直す
@@ -1269,7 +1285,7 @@ async function saveExpense(f) {
   if (state.view.id && state.view.snapshot) {
     const before = state.view.snapshot;
     const latest = expenseSnapshot(state.view.id);
-    const keys = ['title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'payer_id', 'paid_at', 'paid_time', 'category'];
+    const keys = ['title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'payer_id', 'paid_at', 'paid_time', 'category', 'prepaid'];
     const rowChanged = keys.some((k) => String(before.row[k] ?? '') !== String(latest.row[k] ?? ''));
     if (rowChanged || before.shares !== latest.shares) {
       const what = rowChanged ? expenseDiff(before.row, latest.row) : '割る人などを変更';
@@ -1467,7 +1483,7 @@ function changesAfterConfirm() {
   const at = state.data.group.confirmed_at;
   if (!at) return [];
   return state.data.logs.filter((l) => new Date(l.created_at) > new Date(at)
-    && (l.table_name === 'expenses' || (l.table_name === 'payments' && l.detail?.kind === 'loan')));
+    && ((l.table_name === 'expenses' && isMoneyUpdate(l)) || (l.table_name === 'payments' && (l.detail?.kind === 'loan' || l.detail?.kind === 'advance'))));
 }
 
 function viewConfirmBox() {
@@ -1526,8 +1542,8 @@ function viewMine() {
       </li>`).join('');
   };
   const byCat = sumBy((e) => e.category || '未分類');
-  const byDay = sumBy((e) => e.paid_at);
-  const days = [...byDay.keys()].sort();
+  const byDay = sumBy((e) => (e.prepaid ? 'prepaid' : e.paid_at));
+  const days = [...byDay.keys()].filter((k) => k !== 'prepaid').sort();
 
   // 種類ごとに、最初は金額だけを見せて閉じておく
   const maxCat = Math.max(...byCat.values(), 1);
@@ -1546,12 +1562,13 @@ function viewMine() {
 
   // 日ごとにも、最初は金額だけを見せて閉じておく
   const maxDay = Math.max(...byDay.values(), 1);
-  const dayGroups = [...days].reverse().map((d) => {
-    const its = items.filter((x) => x.e.paid_at === d);
+  const dayKeys = [...(byDay.has('prepaid') ? ['prepaid'] : []), ...[...days].reverse()];
+  const dayGroups = dayKeys.map((d) => {
+    const its = items.filter((x) => (d === 'prepaid' ? x.e.prepaid : !x.e.prepaid && x.e.paid_at === d));
     return `
       <details class="genre" data-key="day:${esc(d)}">
         <summary>
-          <span class="g-name">${dayLabel(d)}<span class="sub">（${its.length}件）</span></span>
+          <span class="g-name">${d === 'prepaid' ? '旅行前' : dayLabel(d)}<span class="sub">（${its.length}件）</span></span>
           <span class="bar"><span style="width:${Math.max(2, Math.round((byDay.get(d) / maxDay) * 100))}%"></span></span>
           <span class="g-val">${yen(byDay.get(d))}</span>
         </summary>
@@ -1750,7 +1767,7 @@ async function restoreFromLog(logId, quiet = false) {
     if (!d.members.some((m) => m.id === r.payer_id)) return toast('立て替えた人がもういないため戻せません');
     if (!quiet && !await askConfirm(`支払い「${r.title}」（${yen(r.jpy_amount)}）を元に戻しますか？`, { ok: '元に戻す' })) return;
     const row = {};
-    for (const k of ['id', 'group_id', 'payer_id', 'title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'receipt_path', 'paid_at', 'paid_time', 'category', 'created_at']) {
+    for (const k of ['id', 'group_id', 'payer_id', 'title', 'amount', 'currency', 'rate', 'jpy_amount', 'jpy_confirmed', 'receipt_path', 'paid_at', 'paid_time', 'category', 'prepaid', 'created_at']) {
       if (k in r) row[k] = r[k];
     }
     await check(state.db.from('expenses').insert(row));
@@ -1828,6 +1845,7 @@ function expenseChanges(o, n) {
   if (o.paid_at !== n.paid_at) add('日付', o.paid_at, n.paid_at);
   if ((o.paid_time || '') !== (n.paid_time || '')) add('時間', (o.paid_time || 'なし').slice(0, 5), (n.paid_time || 'なし').slice(0, 5));
   if ((o.category || '') !== (n.category || '')) add('種類', o.category || '未分類', n.category || '未分類');
+  if (!!o.prepaid !== !!n.prepaid) add('旅行前', o.prepaid ? 'はい' : 'いいえ', n.prepaid ? 'はい' : 'いいえ');
   return out;
 }
 
@@ -1894,7 +1912,17 @@ function canRestore(l) {
 // 「お金の変更・削除」に入れるもの。
 // お金をこっそり動かしていないかを確かめるための欄なので、お金に関わる変更・削除と、
 // その前ぶれになりうる「確定の取り消し」「暗証番号のリセット」だけを入れる
+// 支払いの変更が、お金に関わるものか。
+// 種類・名前・日付・時間だけの変更は入れない。見える項目に変化がない変更は「割る人」などの変更なので入れる
+const MONEY_FIELDS = ['金額', '元の金額', '立て替えた人'];
+function isMoneyUpdate(l) {
+  if (l.table_name !== 'expenses' || l.action !== 'UPDATE' || !l.old_detail) return true;
+  const ch = expenseChanges(l.old_detail, l.detail || {});
+  return ch.length === 0 || ch.some((c) => MONEY_FIELDS.includes(c.label));
+}
+
 function isMoneyChange(l) {
+  if (l.table_name === 'expenses' && l.action === 'UPDATE') return isMoneyUpdate(l);
   if ((l.table_name === 'expenses' || l.table_name === 'payments') && (l.action === 'UPDATE' || l.action === 'DELETE')) return true;
   return l.action === 'UNCONFIRM' || l.action === 'PIN_RESET';
 }
@@ -2077,7 +2105,10 @@ app.addEventListener('click', (ev) => {
     case 'fetch-rate': run(fillRate); break;
     case 'amount-plus': {
       const input = document.querySelector('#expense-form input[name="amount"]');
-      if (input.value && !/[+]$/.test(input.value)) input.value += '+';
+      // 1回押すと＋、続けて押すと×、もう1回で＋に戻る
+      if (/[+＋]$/.test(input.value)) input.value = input.value.slice(0, -1) + '×';
+      else if (/[×*]$/.test(input.value)) input.value = input.value.slice(0, -1) + '+';
+      else if (input.value) input.value += '+';
       input.focus();
       updatePreview();
       break;
